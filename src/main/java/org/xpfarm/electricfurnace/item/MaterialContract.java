@@ -49,6 +49,13 @@ public final class MaterialContract {
     /** The byte value stamped under {@link #MACHINE} to mark a machine item. */
     public static final byte MACHINE_MARKER = 1;
 
+    /**
+     * STRING (on a <b>chunk's</b> PersistentDataContainer, not an item): the set of
+     * machine locations registered in that chunk, encoded by
+     * {@link org.xpfarm.electricfurnace.machine.MachineKey}.
+     */
+    public static final NamespacedKey MACHINES = new NamespacedKey("electricfurnace", "machines");
+
     // ---- CopperKingdom's namespace -- read only, never written to here ----------------
 
     /** STRING (foreign, CopperKingdom): marks an item as CopperKingdom copper armor. */
