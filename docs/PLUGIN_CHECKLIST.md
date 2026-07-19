@@ -305,7 +305,12 @@ Evidence from the second run:
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
   - `.github/workflows/build.yml` copied byte-for-byte from the CopperKingdom reference, which matches `GITHUB_ACTIONS.md`. Triggers: push to `main`, `v*` tags, PRs targeting `main`, `workflow_dispatch`. `actions/checkout@v7`, `actions/setup-java@v5` (Temurin 25, Maven cache), `mvn --batch-mode --no-transfer-progress clean verify`, `SHA256SUMS.txt` excluding `original-*`, `actions/upload-artifact@v7`, tag-gated `gh release view`/`create`/`upload --clobber`.
 - [ ] Successful main Actions run is recorded before tagging.
-  - Not tickable here — this is `minecraft-plugin-release`'s (gate 8b). Additionally **no run exists yet**, because the push was blocked (see §2 blockers).
+  - Left for `minecraft-plugin-release` (gate 8b) to tick, per the gate split — but the
+    evidence now exists: run
+    [29706471487](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29706471487)
+    on `main` (commit `9025cf9`) completed **success** in 25s, 2026-07-19, building
+    the full 238-test suite on Temurin 25 in a clean environment. The earlier scaffold
+    run 29703069182 also succeeded.
 - [x] Workflow permissions contain no broader access than the documented contract.
   - `permissions: contents: write` only. No `packages:`, `id-token:`, or other scopes.
 
