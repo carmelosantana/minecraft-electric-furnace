@@ -1,0 +1,379 @@
+/*
+ * ElectricFurnace - a redstone-powered smelter that recycles metal gear into ingots.
+ * Copyright (C) 2026 Carmelo Santana
+ *
+ * This program is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU Affero General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option) any later version.
+ * See the LICENSE file at the project root for the full license text.
+ */
+package org.xpfarm.electricfurnace.effect;
+
+import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.Particle;
+import org.bukkit.SoundCategory;
+import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.world.ChunkLoadEvent;
+import org.bukkit.event.world.ChunkUnloadEvent;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.scheduler.BukkitTask;
+import org.xpfarm.electricfurnace.config.EfConfig;
+import org.xpfarm.electricfurnace.machine.MachineRegistry;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
+
+/**
+ * The plugin's single global effects loop: sparks, smoke, and a hum for every running
+ * Electric Furnace that somebody is close enough to notice.
+ *
+ * <h2>Performance is the requirement here, not a preference</h2>
+ *
+ * <p>The sibling plugin CopperKingdom shipped a listener that rescanned 1,331 blocks
+ * on every player movement packet. It does not survive a populated server. This class
+ * is written specifically to not be that, and every one of the following is load
+ * bearing:
+ *
+ * <ul>
+ *   <li><b>Exactly one {@link BukkitTask} for the whole server.</b> Not one per
+ *       machine, not one per chunk, not one per world. A server with ten thousand
+ *       machines schedules exactly one repeating task, same as a server with one.</li>
+ *   <li><b>No world scanning, ever.</b> The set of machines to consider is an
+ *       in-memory cache keyed by loaded chunk, maintained incrementally by
+ *       {@link ChunkLoadEvent} / {@link ChunkUnloadEvent} and by machine place/break.
+ *       A run iterates that cache directly; it never walks blocks, never queries a
+ *       chunk it was not told about, and never reads a PDC on the hot path -- chunk
+ *       PDC reads happen once per chunk load, not once per run.</li>
+ *   <li><b>Unloaded chunks cost nothing and are never force-loaded.</b> Entries leave
+ *       the cache on chunk unload, so a machine in an unloaded chunk is not merely
+ *       skipped, it is not even visited. {@link Block#getChunk()} would load a chunk
+ *       on demand, so the cache is keyed by coordinates and validated with
+ *       {@link World#isChunkLoaded(int, int)} instead.</li>
+ *   <li><b>The nearby-player check gates everything.</b> If
+ *       {@link World#getNearbyPlayers(Location, double)} comes back empty, the machine
+ *       is abandoned immediately -- before any block state read, before any particle
+ *       is constructed. Effects nobody can see are pure waste.</li>
+ *   <li><b>Per-player {@code spawnParticle} overloads, never the broadcast ones.</b>
+ *       The broadcast overload sends to every player tracking the chunk regardless of
+ *       the radius the operator configured, silently defeating
+ *       {@code effects.player-radius}.</li>
+ * </ul>
+ *
+ * <h2>Bedrock/Geyser safety</h2>
+ *
+ * <p>Only {@link Particle#ELECTRIC_SPARK} and {@link Particle#CAMPFIRE_COSY_SMOKE} are
+ * emitted -- both confirmed mapped in Geyser. No display entities and no colored
+ * {@code DUST} particles appear anywhere in this class: the former are invisible to
+ * Bedrock clients, and the latter lose their color in translation.
+ * {@link #approvedParticleNames()} exposes the list so a unit test can fail if a third
+ * particle is ever added.
+ *
+ * <h2>Testability</h2>
+ *
+ * <p>The decisions -- {@link #shouldSchedule}, {@link #machineIsActive},
+ * {@link #shouldEmit} -- are static functions over primitives, so
+ * {@code MachineEffectsTest} pins them exhaustively with no running server, following
+ * the pattern of {@code FurnaceGui#mayRun} and {@code GuiLayout#roleOf}. What remains
+ * in this class is Bukkit glue thin enough to read.
+ */
+public final class MachineEffects implements Listener {
+
+    /**
+     * The only particles this plugin may ever emit. Both are confirmed mapped in
+     * Geyser; see the class-level Bedrock note before touching this.
+     */
+    private static final Particle[] APPROVED_PARTICLES = {
+            Particle.ELECTRIC_SPARK, Particle.CAMPFIRE_COSY_SMOKE
+    };
+
+    private static final int SPARK_COUNT = 4;
+    private static final int SMOKE_COUNT = 2;
+    private static final double SPREAD = 0.25D;
+    private static final float SOUND_VOLUME = 0.35F;
+    private static final float SOUND_PITCH = 1.6F;
+
+    private final Plugin plugin;
+    private final MachineRegistry machines;
+    private final Supplier<EfConfig> configSupplier;
+
+    /**
+     * Machine block coordinates per loaded chunk. Keyed by {@link ChunkId} rather than
+     * by {@link Chunk} so nothing here can keep an unloaded chunk alive, and so a
+     * lookup never triggers a chunk load. Concurrent because chunk load/unload events
+     * may arrive off the main thread on Paper, while the effects task reads on it.
+     */
+    private final Map<ChunkId, Set<BlockPos>> byChunk = new ConcurrentHashMap<>();
+
+    private BukkitTask task;
+
+    /**
+     * @param plugin         owning plugin, used only to schedule the single task
+     * @param machines       the machine registry, consulted on chunk load -- never on
+     *                       the hot path
+     * @param configSupplier live config accessor, so {@code /electricfurnace reload}
+     *                       is picked up without rebuilding this object
+     */
+    public MachineEffects(Plugin plugin, MachineRegistry machines, Supplier<EfConfig> configSupplier) {
+        this.plugin = Objects.requireNonNull(plugin, "plugin");
+        this.machines = Objects.requireNonNull(machines, "machines");
+        this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
+    }
+
+    // =================================================================================
+    // Pure decision logic -- see MachineEffectsTest
+    // =================================================================================
+
+    /**
+     * Whether the single global task should be scheduled at all. A disabled effects
+     * section must cost exactly zero: no task that wakes up only to decide it has
+     * nothing to do.
+     */
+    public static boolean shouldSchedule(boolean enabled, int periodTicks) {
+        return enabled && periodTicks > 0;
+    }
+
+    /**
+     * Whether a machine counts as running for effects purposes. With
+     * {@code machine.require-redstone-signal} disabled the machine is always on, so it
+     * always looks on.
+     */
+    public static boolean machineIsActive(boolean powered, boolean requireSignal) {
+        return !requireSignal || powered;
+    }
+
+    /**
+     * The per-machine, per-run gate. Effects are emitted only for an active machine
+     * that at least one player is close enough to perceive.
+     *
+     * @param enabled          {@code effects.enabled}
+     * @param periodTicks      {@code effects.period-ticks}
+     * @param nearbyPlayerCount how many players are within {@code effects.player-radius}
+     * @param machineActive    per {@link #machineIsActive}
+     */
+    public static boolean shouldEmit(boolean enabled, int periodTicks, int nearbyPlayerCount, boolean machineActive) {
+        return shouldSchedule(enabled, periodTicks) && machineActive && nearbyPlayerCount > 0;
+    }
+
+    /** Names of the only particles this class emits; asserted by {@code MachineEffectsTest}. */
+    public static List<String> approvedParticleNames() {
+        List<String> names = new ArrayList<>(APPROVED_PARTICLES.length);
+        for (Particle particle : APPROVED_PARTICLES) {
+            names.add(particle.name());
+        }
+        return List.copyOf(names);
+    }
+
+    // =================================================================================
+    // Lifecycle
+    // =================================================================================
+
+    /**
+     * Seeds the cache from every already-loaded chunk and starts the single global
+     * task, if the current config calls for one.
+     *
+     * <p>Safe to call repeatedly: {@code /electricfurnace reload} calls it after
+     * {@link #stop()} to pick up a changed {@code effects.period-ticks} without a
+     * server restart. Never throws -- an effects failure must not take the plugin
+     * down with it.
+     */
+    public void start() {
+        EfConfig config = configSupplier.get();
+        seedLoadedChunks();
+
+        if (!shouldSchedule(config.effects().enabled(), config.effects().periodTicks())) {
+            return;
+        }
+        int period = config.effects().periodTicks();
+        task = Bukkit.getScheduler().runTaskTimer(plugin, this::run, period, period);
+    }
+
+    /** Cancels the global task, if running. Idempotent. */
+    public void stop() {
+        if (task != null) {
+            task.cancel();
+            task = null;
+        }
+    }
+
+    /** Stops and restarts the task, applying the current config's period. */
+    public void restart() {
+        stop();
+        start();
+    }
+
+    /** Whether the single global task is currently scheduled. */
+    public boolean isRunning() {
+        return task != null;
+    }
+
+    /** How many machines are currently cached across all loaded chunks. */
+    public int trackedMachineCount() {
+        return byChunk.values().stream().mapToInt(Set::size).sum();
+    }
+
+    private void seedLoadedChunks() {
+        byChunk.clear();
+        for (World world : Bukkit.getWorlds()) {
+            for (Chunk chunk : world.getLoadedChunks()) {
+                indexChunk(chunk);
+            }
+        }
+    }
+
+    // =================================================================================
+    // Cache maintenance -- the only place a chunk PDC is ever read
+    // =================================================================================
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onChunkLoad(ChunkLoadEvent event) {
+        indexChunk(event.getChunk());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onChunkUnload(ChunkUnloadEvent event) {
+        byChunk.remove(ChunkId.of(event.getChunk()));
+    }
+
+    /**
+     * Re-indexes only the affected chunk when a machine item is placed. Guarded on the
+     * PDC marker first so an ordinary block place -- by far the common case -- costs a
+     * single {@code ItemStack} check and nothing else.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlace(BlockPlaceEvent event) {
+        if (org.xpfarm.electricfurnace.item.MaterialContract.isMachine(event.getItemInHand())) {
+            indexChunk(event.getBlockPlaced().getChunk());
+        }
+    }
+
+    /**
+     * Re-indexes only the affected chunk when a machine is broken. Guarded on the block
+     * type first: only a blast furnace can ever have been a machine, so every other
+     * block break costs one enum comparison.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBreak(BlockBreakEvent event) {
+        if (event.getBlock().getType() == Material.BLAST_FURNACE) {
+            indexChunk(event.getBlock().getChunk());
+        }
+    }
+
+    /**
+     * Rebuilds one chunk's cache entry from the registry. This is the only path that
+     * reads a chunk PDC, and it runs once per chunk load or machine place/break --
+     * never on the effects task's hot path.
+     */
+    private void indexChunk(Chunk chunk) {
+        ChunkId id = ChunkId.of(chunk);
+        Set<BlockPos> positions = new LinkedHashSet<>();
+        for (Block block : machines.machinesIn(chunk)) {
+            positions.add(new BlockPos(block.getX(), block.getY(), block.getZ()));
+        }
+        if (positions.isEmpty()) {
+            byChunk.remove(id);
+        } else {
+            byChunk.put(id, positions);
+        }
+    }
+
+    // =================================================================================
+    // The single global task
+    // =================================================================================
+
+    private void run() {
+        EfConfig config = configSupplier.get();
+        boolean enabled = config.effects().enabled();
+        int period = config.effects().periodTicks();
+        if (!shouldSchedule(enabled, period)) {
+            // Config was reloaded to disabled between restarts; do nothing rather than
+            // relying solely on the task having been cancelled.
+            return;
+        }
+        int radius = config.effects().playerRadius();
+        boolean requireSignal = config.machine().requireRedstoneSignal();
+        String soundName = config.effects().sound();
+
+        for (Map.Entry<ChunkId, Set<BlockPos>> entry : byChunk.entrySet()) {
+            ChunkId id = entry.getKey();
+            World world = Bukkit.getWorld(id.worldName());
+            if (world == null || !world.isChunkLoaded(id.x(), id.z())) {
+                // The chunk went away without an unload event we saw (world unloaded,
+                // for instance). Drop it rather than touching it -- reading a block here
+                // would force the chunk back into memory.
+                byChunk.remove(id);
+                continue;
+            }
+            for (BlockPos pos : entry.getValue()) {
+                emitFor(world, pos, radius, requireSignal, enabled, period, soundName);
+            }
+        }
+    }
+
+    private void emitFor(World world, BlockPos pos, int radius, boolean requireSignal,
+            boolean enabled, int period, String soundName) {
+        Location center = new Location(world, pos.x() + 0.5D, pos.y() + 1.05D, pos.z() + 0.5D);
+
+        // Cheapest gate first: no observer, no work. Everything below this line --
+        // including the block state read -- is skipped for an unwatched machine.
+        Collection<Player> audience = world.getNearbyPlayers(center, radius);
+        if (audience.isEmpty()) {
+            return;
+        }
+
+        Block block = world.getBlockAt(pos.x(), pos.y(), pos.z());
+        boolean active = machineIsActive(block.getBlockPower() > 0, requireSignal);
+        if (!shouldEmit(enabled, period, audience.size(), active)) {
+            return;
+        }
+
+        for (Player player : audience) {
+            // Per-player overloads, deliberately: the broadcast overloads would send to
+            // everyone tracking the chunk and quietly ignore effects.player-radius.
+            player.spawnParticle(Particle.ELECTRIC_SPARK, center, SPARK_COUNT, SPREAD, SPREAD, SPREAD, 0.0D);
+            player.spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, center, SMOKE_COUNT, SPREAD, SPREAD, SPREAD, 0.0D);
+            if (soundName != null) {
+                // Null means the configured sound name did not resolve; per EfConfig
+                // that disables sound only, leaving particles playing.
+                player.playSound(center, soundName, SoundCategory.BLOCKS, SOUND_VOLUME, SOUND_PITCH);
+            }
+        }
+    }
+
+    // =================================================================================
+    // Value keys
+    // =================================================================================
+
+    /**
+     * A loaded chunk's identity, by world name and chunk coordinates.
+     *
+     * <p>Deliberately not a {@link Chunk} reference: holding one would pin an unloaded
+     * chunk in memory, and going back through {@code Chunk} to reach a block would
+     * risk loading it.
+     */
+    private record ChunkId(String worldName, int x, int z) {
+        static ChunkId of(Chunk chunk) {
+            return new ChunkId(chunk.getWorld().getName(), chunk.getX(), chunk.getZ());
+        }
+    }
+
+    /** Absolute block coordinates of one machine. */
+    private record BlockPos(int x, int y, int z) {
+    }
+}

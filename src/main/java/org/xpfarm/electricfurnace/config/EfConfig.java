@@ -96,7 +96,7 @@ public record EfConfig(MachineSettings machine, EffectSettings effects, Recyclin
             return DEFAULT_SOUND;
         }
         String candidate = String.valueOf(raw);
-        if (resolvesToKnownSound(candidate)) {
+        if (resolvesToKnownSound(candidate, warn)) {
             return candidate;
         }
         warn.accept("ElectricFurnace config: key 'effects.sound' has invalid value '" + candidate
@@ -104,10 +104,30 @@ public record EfConfig(MachineSettings machine, EffectSettings effects, Recyclin
         return null;
     }
 
-    private static boolean resolvesToKnownSound(String name) {
+    /**
+     * Whether {@code name} resolves to a constant on the {@link Sound} registry class.
+     *
+     * <p><b>Catches {@link Throwable}, deliberately.</b> Reflecting on {@code Sound}
+     * triggers its static initializer, which on Paper walks the server's sound
+     * registry. On a version mismatch, a partially-initialised server, or a shaded
+     * classpath problem that fails as an {@link Error} (typically
+     * {@code ExceptionInInitializerError}, {@code NoClassDefFoundError}, or
+     * {@code LinkageError}), an {@code Error} is not a
+     * {@link ReflectiveOperationException} and would escape this method, propagate out
+     * of {@link #load}, and fail plugin startup. That directly violates this class's
+     * central contract: a configuration problem must never fail startup. So every
+     * {@code Throwable} degrades exactly the same way an unknown sound name does --
+     * warn, and disable sound only, leaving particles untouched.
+     */
+    private static boolean resolvesToKnownSound(String name, Consumer<String> warn) {
         try {
             return Sound.class.getField(name).get(null) instanceof Sound;
         } catch (ReflectiveOperationException e) {
+            return false;
+        } catch (Throwable t) {
+            warn.accept("ElectricFurnace config: could not consult the Sound registry while resolving"
+                    + " 'effects.sound' (" + t.getClass().getName() + ": " + t.getMessage()
+                    + "); sound disabled, particles unaffected.");
             return false;
         }
     }
