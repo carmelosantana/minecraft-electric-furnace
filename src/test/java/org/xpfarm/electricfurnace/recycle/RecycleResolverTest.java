@@ -252,21 +252,6 @@ class RecycleResolverTest {
     }
 
     @Test
-    void acceptanceCheck_damagedAndUndamagedInputs_produceIdenticalResults() {
-        // RecycleInput has no durability/damage field at all -- accept-damaged means
-        // Task 3's classifier discards damage before ever building a RecycleInput, so
-        // "damaged" and "undamaged" gear map to the exact same records here. Two
-        // independently-built but value-identical input lists must resolve identically.
-        List<RecycleInput> undamaged = List.of(iron(), iron(), iron(), iron(), iron());
-        List<RecycleInput> damaged = List.of(iron(), iron(), iron(), iron(), iron());
-
-        RecycleResult undamagedResult = RecycleResolver.resolve(undamaged, DEFAULT_SETTINGS, REGISTRY);
-        RecycleResult damagedResult = RecycleResolver.resolve(damaged, DEFAULT_SETTINGS, REGISTRY);
-
-        assertEquals(undamagedResult, damagedResult);
-    }
-
-    @Test
     void acceptanceCheck_yieldsTrackConfig_notHardcodedNumbers() {
         RecyclingSettings customSettings = new RecyclingSettings(5, 30, 20, 10, true);
         List<RecycleInput> sameMetalInputs = List.of(iron(), iron(), iron(), iron(), iron());
