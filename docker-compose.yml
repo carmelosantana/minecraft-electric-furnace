@@ -13,7 +13,7 @@ services:
       - "${XPFARM_BEDROCK_PORT:-19132}:${XPFARM_BEDROCK_PORT:-19132}/udp"
     volumes:
       - minecraft:/minecraft
-      - ./target/electric-furnace-0.1.1.jar:/minecraft/plugins/electric-furnace.jar
+      - ./target/electric-furnace-0.1.2.jar:/minecraft/plugins/electric-furnace.jar
     stdin_open: true
     tty: true
     entrypoint: ["/bin/bash", "/scripts/start.sh"]
