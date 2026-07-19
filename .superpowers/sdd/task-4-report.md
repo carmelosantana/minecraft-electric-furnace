@@ -127,3 +127,104 @@ Environment: sourced `~/.sdkman/bin/sdkman-init.sh` for Java 25.0.3-tem / Maven
   API is documented as safe to call for any chunk coordinate (it does not force-load
   neighboring chunks) — this was not empirically verified against a live server in
   this task, consistent with the "no server available" constraint noted above.
+
+---
+
+# Task 4 — Close review findings — Report
+
+## Finding 1 (Important): missing hostile-input tests in `MachineKeyTest`
+
+`MachineKey.decode`/`encode` themselves were not touched (confirmed total/correct by
+review; only tests were added around them). Added 13 new tests to
+`src/test/java/org/xpfarm/electricfurnace/machine/MachineKeyTest.java`, each wrapping
+the call in `assertDoesNotThrow` (in addition to asserting the resulting set) so the
+"never throws" contract is checked explicitly, not just implicitly via test-framework
+failure propagation:
+
+- **Empty segments**: `"1::3"` (middle field empty), `"::"` (all three fields empty),
+  plus `"1::3,5:70:5"` proving a good sibling entry still survives.
+- **Integer overflow**: `"99999999999:5:5"`, `"-99999999999:5:5"` (both overflow
+  `Integer.parseInt`, caught as `NumberFormatException` inside `MachineKey.parseInt`),
+  plus a good-entry-survives variant.
+- **Leading/trailing separators**: `",1:2:3"` (leading entry separator — the resulting
+  empty entry is skipped, the real entry `(1,2,3)` survives), `":5:5"` (leading field
+  separator), `"5:5:"` (trailing field separator).
+- **Whitespace-only segment**: `"1: :3"`, plus a good-entry-survives variant
+  (`"1: :3,4:64:4"`).
+- **Null input**: `decode_nullString_yieldsEmptySetNotNpe` — a null-input test already
+  existed (`decode_nullString_yieldsEmptySet`); added a second one that explicitly
+  wraps the call in `assertDoesNotThrow` per the finding's exact wording ("assert it
+  yields an empty set, not an NPE"), rather than relying only on the pre-existing
+  assertion style.
+
+Every new test asserts both the resulting `Set<MachineKey.Coord>` contents (empty, or
+containing exactly the surviving good entry) and that no exception escaped
+(`assertDoesNotThrow`), and where a good entry was paired with a bad one, asserts the
+good entry survives.
+
+`MachineKeyTest` went from 20 to 32 tests, all passing.
+
+## Finding 2 (real runtime risk): unguarded PDC read/write in `MachineRegistry`
+
+File: `src/main/java/org/xpfarm/electricfurnace/machine/MachineRegistry.java`
+
+- **`readCoords`**: now calls `pdc.has(MaterialContract.MACHINES,
+  PersistentDataType.STRING)` before `pdc.get(...)`, and the whole read (the `has`
+  check plus the `get`) is wrapped in `try { ... } catch (RuntimeException e)`. If a
+  non-STRING NBT primitive is ever found under that key (another plugin, a bug,
+  hand-edited chunk data) and the PDC implementation throws
+  `IllegalArgumentException` rather than returning `null`, the exception is caught,
+  a warning naming the chunk (world name + chunk x,z) and the exception type/message
+  is sent to `warn`, and the chunk is treated as having no machines (`new HashSet<>()`
+  returned) instead of letting the exception escape into Bukkit's chunk-load path.
+- **`writeCoords`**: the same defensive treatment was applied to the write path
+  (`pdc.remove`/`pdc.set`), wrapped in `try/catch (RuntimeException e)`, logging a
+  warning naming the chunk and the exception, and swallowing it rather than letting
+  it propagate into the caller's block-place/break event handling. `writeCoords` was
+  changed from `static` to an instance method so it can reach the instance's `warn`
+  sink (the only change to its signature; its call sites in `register`/`unregister`
+  were already unqualified instance calls and needed no changes).
+- No other logic in `MachineRegistry` was refactored; `isMachine`, `register`,
+  `unregister`, `machinesIn`, and `relativeOf` are unchanged apart from `readCoords`/
+  `writeCoords` bodies as described above.
+
+`MachineRegistry` still has no dedicated unit test (unchanged from Task 4's original
+report: `Chunk`/`Block`/`PersistentDataContainer` cannot be constructed without a live
+Bukkit server), so this fix is unverified by an automated test exercising the actual
+`IllegalArgumentException`-on-non-STRING-read scenario; it is verified by inspection
+and by the full build continuing to pass.
+
+## Build verification
+
+Command:
+
+```
+mvn --batch-mode --no-transfer-progress clean verify
+```
+
+Output (tail):
+
+```
+[INFO] Running org.xpfarm.electricfurnace.item.MetalClassifierTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.137 s -- in org.xpfarm.electricfurnace.item.MetalClassifierTest
+[INFO] Running org.xpfarm.electricfurnace.config.ConfigValidatorTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.039 s -- in org.xpfarm.electricfurnace.config.ConfigValidatorTest
+[INFO] Running org.xpfarm.electricfurnace.recycle.RecycleResolverTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.024 s -- in org.xpfarm.electricfurnace.recycle.RecycleResolverTest
+[INFO] Running org.xpfarm.electricfurnace.machine.MachineKeyTest
+[INFO] Tests run: 32, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.044 s -- in org.xpfarm.electricfurnace.machine.MachineKeyTest
+[INFO] Running org.xpfarm.electricfurnace.alloy.AlloyRegistryTest
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.011 s -- in org.xpfarm.electricfurnace.alloy.AlloyRegistryTest
+[INFO]
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 99, Failures: 0, Errors: 0, Skipped: 0
+...
+[INFO] BUILD SUCCESS
+```
+
+Total tests: 99 (up from 87; `MachineKeyTest` grew from 20 to 32, the other four
+suites unchanged). Shaded JAR built successfully.
+
+Environment: sourced `~/.sdkman/bin/sdkman-init.sh` for Java 25.0.3-tem / Maven
+3.9.16, since `java`/`mvn` are not on PATH by default.

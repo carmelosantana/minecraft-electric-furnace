@@ -16,6 +16,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -218,5 +219,114 @@ class MachineKeyTest {
 
         assertEquals(1, warnings.size());
         assertTrue(warnings.get(0).contains("garbage"), "warning should name the offending entry: " + warnings.get(0));
+    }
+
+    // ---- empty segments ("field::field", "::") ---------------------------------------
+
+    @Test
+    void decode_emptyMiddleField_isSkippedNotThrown() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode("1::3", this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void decode_emptyMiddleField_withGoodEntry_dropsOnlyTheBadOne() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode("1::3,5:70:5", this::warn));
+
+        assertEquals(Set.of(new MachineKey.Coord(5, 70, 5)), decoded);
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void decode_allFieldsEmpty_isSkippedNotThrown() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode("::", this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertEquals(1, warnings.size());
+    }
+
+    // ---- integer overflow --------------------------------------------------------------
+
+    @Test
+    void decode_positiveIntegerOverflow_isSkippedNotThrown() {
+        Set<MachineKey.Coord> decoded =
+                assertDoesNotThrow(() -> MachineKey.decode("99999999999:5:5", this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void decode_negativeIntegerOverflow_isSkippedNotThrown() {
+        Set<MachineKey.Coord> decoded =
+                assertDoesNotThrow(() -> MachineKey.decode("-99999999999:5:5", this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void decode_integerOverflow_withGoodEntry_dropsOnlyTheBadOne() {
+        Set<MachineKey.Coord> decoded =
+                assertDoesNotThrow(() -> MachineKey.decode("99999999999:5:5,2:64:2", this::warn));
+
+        assertEquals(Set.of(new MachineKey.Coord(2, 64, 2)), decoded);
+        assertEquals(1, warnings.size());
+    }
+
+    // ---- leading/trailing separators ---------------------------------------------------
+
+    @Test
+    void decode_leadingEntrySeparator_dropsOnlyTheEmptyEntry() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode(",1:2:3", this::warn));
+
+        assertEquals(Set.of(new MachineKey.Coord(1, 2, 3)), decoded);
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void decode_leadingFieldSeparator_isSkippedNotThrown() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode(":5:5", this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void decode_trailingFieldSeparator_isSkippedNotThrown() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode("5:5:", this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertEquals(1, warnings.size());
+    }
+
+    // ---- whitespace-only field -----------------------------------------------------------
+
+    @Test
+    void decode_whitespaceOnlyField_isSkippedNotThrown() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode("1: :3", this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void decode_whitespaceOnlyField_withGoodEntry_dropsOnlyTheBadOne() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode("1: :3,4:64:4", this::warn));
+
+        assertEquals(Set.of(new MachineKey.Coord(4, 64, 4)), decoded);
+        assertEquals(1, warnings.size());
+    }
+
+    // ---- null input (already asserted above; re-affirmed here with assertDoesNotThrow) --
+
+    @Test
+    void decode_nullString_yieldsEmptySetNotNpe() {
+        Set<MachineKey.Coord> decoded = assertDoesNotThrow(() -> MachineKey.decode(null, this::warn));
+
+        assertTrue(decoded.isEmpty());
+        assertTrue(warnings.isEmpty(), "a missing PDC key is not corruption, it's just no machines yet");
     }
 }

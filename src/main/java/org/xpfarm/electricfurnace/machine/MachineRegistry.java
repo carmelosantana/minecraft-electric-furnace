@@ -95,16 +95,44 @@ public final class MachineRegistry {
 
     private Set<MachineKey.Coord> readCoords(Chunk chunk) {
         PersistentDataContainer pdc = chunk.getPersistentDataContainer();
-        String raw = pdc.get(MaterialContract.MACHINES, PersistentDataType.STRING);
+        String raw;
+        try {
+            if (!pdc.has(MaterialContract.MACHINES, PersistentDataType.STRING)) {
+                return new HashSet<>();
+            }
+            raw = pdc.get(MaterialContract.MACHINES, PersistentDataType.STRING);
+        } catch (RuntimeException e) {
+            // Some PersistentDataContainer implementations throw IllegalArgumentException
+            // (rather than returning null) when the stored NBT primitive under this key is
+            // not a STRING -- e.g. written by another plugin, a bug, or hand-edited chunk
+            // data. That exception must never escape into Bukkit's chunk-load path: losing
+            // this one chunk's machine registrations degrades the plugin, but throwing here
+            // breaks the world. Degrade, never throw.
+            warn.accept("ElectricFurnace machine PDC: chunk [" + chunk.getWorld().getName() + " "
+                    + chunk.getX() + "," + chunk.getZ() + "] has a non-STRING value under '"
+                    + MaterialContract.MACHINES + "'; treating chunk as having no machines ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage() + ").");
+            return new HashSet<>();
+        }
         return MachineKey.decode(raw, warn);
     }
 
-    private static void writeCoords(Chunk chunk, Set<MachineKey.Coord> coords) {
+    private void writeCoords(Chunk chunk, Set<MachineKey.Coord> coords) {
         PersistentDataContainer pdc = chunk.getPersistentDataContainer();
-        if (coords.isEmpty()) {
-            pdc.remove(MaterialContract.MACHINES);
-        } else {
-            pdc.set(MaterialContract.MACHINES, PersistentDataType.STRING, MachineKey.encode(coords));
+        try {
+            if (coords.isEmpty()) {
+                pdc.remove(MaterialContract.MACHINES);
+            } else {
+                pdc.set(MaterialContract.MACHINES, PersistentDataType.STRING, MachineKey.encode(coords));
+            }
+        } catch (RuntimeException e) {
+            // Mirror the defensive stance of readCoords: a write failure (e.g. an
+            // incompatible existing NBT primitive under this key) must degrade this
+            // plugin's bookkeeping for the chunk, not propagate into the caller's
+            // block-place/break event handling.
+            warn.accept("ElectricFurnace machine PDC: failed to write machine set for chunk ["
+                    + chunk.getWorld().getName() + " " + chunk.getX() + "," + chunk.getZ() + "] ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage() + ").");
         }
     }
 }
