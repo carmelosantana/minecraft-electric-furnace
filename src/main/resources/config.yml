@@ -54,32 +54,84 @@ recycling:
   # is a primary purpose of this plugin.
   accept-damaged: true
 
-# Alloy recipes. This section is a placeholder for Task 2, which defines the
-# AlloyDefinition/AlloyRegistry model and parses these entries -- no code in this
-# task reads this section. Each entry names the distinct inputs (metals and/or
-# the coal modifier) required to produce that alloy, in any order/quantity as
-# long as every listed input is present. `fused_alloy` is the generic fallback
-# for any mixed-metal combination that matches nothing else.
+# Alloy recipes, parsed by AlloyRegistry#load (Task 2). Each entry names the
+# distinct inputs (metals and/or the coal modifier) required to produce that
+# alloy, in any order/quantity as long as every listed input is present.
+# `fused_alloy` is the generic fallback for any mixed-metal combination that
+# matches nothing else -- it is identified by its empty `inputs` list, not by
+# its id, so renaming it is safe as long as exactly one recipe has empty inputs.
 #
-# Stats (attack damage, attack speed, armor, armor toughness, max durability,
-# enchantability) are added by Task 2. Per the balance ceiling above, no stat may
-# exceed the netherite reference; out-of-range stats are clamped to the diamond
-# reference and logged.
+# `stats` is the full stat block (attack damage, attack speed, armor, armor
+# toughness, max durability, enchantability). Per the balance ceiling above, no
+# stat may exceed the netherite reference; out-of-range stats are clamped to the
+# diamond reference and logged. This clamp runs unconditionally in code -- there
+# is no switch here to disable it.
 alloys:
   steel:
     display-name: "Steel"
+    color: "#71797E"
+    lore:
+      - "A carbon-hardened iron alloy."
+      - "Stronger than iron, cheaper than netherite."
     inputs: [iron, coal]
+    stats:
+      attack-damage: 6.5
+      attack-speed: -2.6
+      armor: 16
+      armor-toughness: 1.0
+      max-durability: 700
+      enchantability: 12
   rose_gold:
     display-name: "Rose Gold"
+    color: "#B76E79"
+    lore:
+      - "A warm copper-gold blend."
     inputs: [copper, gold]
+    stats:
+      attack-damage: 6.2
+      attack-speed: -2.5
+      armor: 15
+      armor-toughness: 0.5
+      max-durability: 500
+      enchantability: 20
   ferrocopper:
     display-name: "Ferrocopper"
+    color: "#B87333"
+    lore:
+      - "Copper toughened with iron."
     inputs: [copper, iron]
+    stats:
+      attack-damage: 6.3
+      attack-speed: -2.5
+      armor: 16
+      armor-toughness: 1.0
+      max-durability: 600
+      enchantability: 14
   electrum_steel:
     display-name: "Electrum Steel"
+    color: "#D4C9A8"
+    lore:
+      - "Gold-veined structural steel."
     inputs: [gold, iron]
+    stats:
+      attack-damage: 6.8
+      attack-speed: -2.4
+      armor: 18
+      armor-toughness: 1.5
+      max-durability: 900
+      enchantability: 16
   fused_alloy:
     display-name: "Fused Alloy"
+    color: "#4B4B4B"
+    lore:
+      - "An unrefined fusion of leftover metals."
     # Fallback: matches any mixed-metal combination not covered by a named recipe
     # above (or 3+ distinct metals). Intentionally has no fixed input list.
     inputs: []
+    stats:
+      attack-damage: 6.0
+      attack-speed: -2.6
+      armor: 15
+      armor-toughness: 0.5
+      max-durability: 400
+      enchantability: 10
