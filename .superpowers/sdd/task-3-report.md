@@ -142,3 +142,101 @@ present.
 - The exhaustive metal-table test hardcodes an expected count (51 entries: 16 iron +
   12 gold + 12 copper + 11 netherite) as a guard against silent drift; if a future
   task extends the table, that count must be updated deliberately alongside it.
+
+---
+
+## Post-hoc correctness fix (2026-07-19): CopperKingdom weapon PDC precedence
+
+### Defect
+
+In `classify(ItemStack, RecyclingSettings)`, the CopperKingdom foreign-PDC fallback
+branch was guarded by `metalOf(material).isEmpty()`, so it only fired when the base
+material was *not* already a known metal. CopperKingdom's armor (built on
+`LEATHER_HELMET`/`LEATHER_CHESTPLATE`/`LEATHER_LEGGINGS`/`LEATHER_BOOTS` bases)
+happened to work correctly, since leather isn't in `METAL_TABLE`. CopperKingdom's
+weapons, however, are built on `IRON_SWORD`/`IRON_AXE`/`IRON_PICKAXE` bases, stamped
+with `copperkingdom:copper_weapon` — iron gear IS in `METAL_TABLE`, so the guard
+short-circuited the CopperKingdom check and a copper sword classified as IRON. A
+player recycling 5 CopperKingdom copper swords received iron ingots instead of
+copper, and the "all same metal" rule saw them as iron. Wrong output for valid
+input.
+
+### Fix
+
+`src/main/java/org/xpfarm/electricfurnace/item/MetalClassifier.java`:
+
+- Removed the `metalOf(material).isEmpty()` condition from the CopperKingdom
+  branch; kept `!isAlloyStamped` (via the new `resolveBranch` precedence — alloy
+  stamp still wins first).
+- Extracted the precedence decision into a new package-private pure helper:
+  `enum ClassificationBranch { ALLOY, FOREIGN_COPPER, TABLE_METAL, MODIFIER,
+  UNRECOGNIZED }` and `static ClassificationBranch resolveBranch(boolean
+  isAlloyStamped, boolean isForeignCopper, boolean isTableMetal, boolean
+  isModifier)`. This converts the previously-untestable ItemStack-only precedence
+  decision into a pure, exhaustively-testable function. `classify(ItemStack,
+  RecyclingSettings)` now calls `resolveBranch(...)` and only special-cases
+  `FOREIGN_COPPER` directly; every other branch still delegates to the unchanged
+  pure `classify(Material, ...)` overload, so that overload's signature and
+  behavior are untouched.
+- Added an inline comment at the `FOREIGN_COPPER` branch explicitly naming the
+  CopperKingdom iron-base weapon case and warning against reinstating a
+  `metalOf(material).isEmpty()` guard.
+- Added a "PDC precedence beats the material table" paragraph to the class-level
+  javadoc documenting this as intended behavior, plus updated the
+  `classify(ItemStack, ...)` method javadoc to describe the new precedence order
+  (alloy stamp -> foreign copper PDC -> material table -> modifier check).
+
+`src/test/java/org/xpfarm/electricfurnace/item/MetalClassifierTest.java`:
+
+- Added 6 new tests exhaustively covering `resolveBranch` over all 16 boolean
+  combinations: alloy-stamp-always-wins (8 combos), foreign-copper-wins-over-table-
+  metal (4 combos, including the exact `isTableMetal=true` CopperKingdom weapon
+  case), table-metal-wins-when-nothing-higher-priority (2 combos), modifier-wins-
+  only-when-nothing-else-matches (1 combo), and unrecognized (1 combo — all
+  16 covered across the 5 tests).
+
+### Pure-helper restructure: done, not skipped
+
+The precedence decision was successfully restructured into `resolveBranch`, a pure
+function over four booleans returning a `ClassificationBranch` enum, and is unit
+tested exhaustively (16/16 combinations) in `MetalClassifierTest`. This did not
+distort the design — `classify(ItemStack, ...)` already computed all four boolean
+facts (`isAlloyStamped`, PDC lookups, `metalOf(material).isPresent()`,
+`isModifier(material)`) before making its decision, so lifting the decision itself
+into a named, pure, package-private method was a natural extraction, not a forced
+one. The pure `classify(Material, String, boolean, boolean, String,
+RecyclingSettings)` overload's signature and internal behavior were left untouched,
+as required.
+
+### Build verification
+
+Command:
+
+```
+mvn --batch-mode --no-transfer-progress clean verify
+```
+
+Actual output (tail):
+
+```
+[INFO] Running org.xpfarm.electricfurnace.recycle.RecycleResolverTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.068 s -- in org.xpfarm.electricfurnace.recycle.RecycleResolverTest
+[INFO] Running org.xpfarm.electricfurnace.alloy.AlloyRegistryTest
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.017 s -- in org.xpfarm.electricfurnace.alloy.AlloyRegistryTest
+[INFO] Running org.xpfarm.electricfurnace.item.MetalClassifierTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.115 s -- in org.xpfarm.electricfurnace.item.MetalClassifierTest
+[INFO] Running org.xpfarm.electricfurnace.config.ConfigValidatorTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.042 s -- in org.xpfarm.electricfurnace.config.ConfigValidatorTest
+[INFO] Results:
+[INFO] Tests run: 67, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+`MetalClassifierTest` went from 14 tests (pre-fix) to 20 tests (6 new `resolveBranch`
+tests added); overall suite went from 61 to 67 tests. Environment: sourced
+`~/.sdkman/bin/sdkman-init.sh` for Java 25.0.3-tem / Maven 3.9.16 as before.
+
+### Files touched
+
+- `src/main/java/org/xpfarm/electricfurnace/item/MetalClassifier.java`
+- `src/test/java/org/xpfarm/electricfurnace/item/MetalClassifierTest.java`

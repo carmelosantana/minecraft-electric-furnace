@@ -211,4 +211,60 @@ class MetalClassifierTest {
         assertTrue(result.isPresent());
         assertTrue(result.get().isAlloy());
     }
+
+    // ---- resolveBranch: pure precedence decision behind classify(ItemStack, ...) -----
+    // This is the testable seam extracted from the ItemStack-facing overload's fallback
+    // ordering: an explicit CopperKingdom PDC stamp must outrank a METAL_TABLE hit, which
+    // is exactly the defect this task fixes (CopperKingdom's copper swords/axes/pickaxes
+    // are minted on IRON_SWORD/IRON_AXE/IRON_PICKAXE bases, so metalOf(material) is
+    // present for them, yet the foreign copper stamp must still win). Exhaustive over all
+    // 16 boolean combinations so the precedence order can never silently regress.
+
+    @Test
+    void resolveBranch_alloyStamp_alwaysWinsFirst() {
+        for (boolean isForeignCopper : List.of(true, false)) {
+            for (boolean isTableMetal : List.of(true, false)) {
+                for (boolean isModifier : List.of(true, false)) {
+                    assertEquals(MetalClassifier.ClassificationBranch.ALLOY,
+                            MetalClassifier.resolveBranch(true, isForeignCopper, isTableMetal, isModifier),
+                            "alloy stamp must win regardless of other flags");
+                }
+            }
+        }
+    }
+
+    @Test
+    void resolveBranch_foreignCopper_winsOverTableMetal_whenNotAlloyStamped() {
+        // The exact CopperKingdom iron-base weapon case: isTableMetal is true (IRON_SWORD
+        // is in METAL_TABLE) but the foreign PDC stamp is still more specific evidence and
+        // must win.
+        assertEquals(MetalClassifier.ClassificationBranch.FOREIGN_COPPER,
+                MetalClassifier.resolveBranch(false, true, true, false));
+        assertEquals(MetalClassifier.ClassificationBranch.FOREIGN_COPPER,
+                MetalClassifier.resolveBranch(false, true, true, true));
+        assertEquals(MetalClassifier.ClassificationBranch.FOREIGN_COPPER,
+                MetalClassifier.resolveBranch(false, true, false, false));
+        assertEquals(MetalClassifier.ClassificationBranch.FOREIGN_COPPER,
+                MetalClassifier.resolveBranch(false, true, false, true));
+    }
+
+    @Test
+    void resolveBranch_tableMetal_winsWhenNotAlloyStamped_norForeignCopper() {
+        assertEquals(MetalClassifier.ClassificationBranch.TABLE_METAL,
+                MetalClassifier.resolveBranch(false, false, true, false));
+        assertEquals(MetalClassifier.ClassificationBranch.TABLE_METAL,
+                MetalClassifier.resolveBranch(false, false, true, true));
+    }
+
+    @Test
+    void resolveBranch_modifier_winsOnlyWhenNothingElseMatches() {
+        assertEquals(MetalClassifier.ClassificationBranch.MODIFIER,
+                MetalClassifier.resolveBranch(false, false, false, true));
+    }
+
+    @Test
+    void resolveBranch_unrecognized_whenNoFlagsSet() {
+        assertEquals(MetalClassifier.ClassificationBranch.UNRECOGNIZED,
+                MetalClassifier.resolveBranch(false, false, false, false));
+    }
 }

@@ -46,6 +46,20 @@ import java.util.Set;
  * {@link Optional#empty()}) rather than being partially accepted -- pristine gear of
  * the same type still classifies normally. This gate does not apply to alloy items:
  * remelting is not a "damaged gear" concept.
+ *
+ * <p><b>PDC precedence beats the material table.</b> An explicit foreign PDC stamp is
+ * more specific evidence about what an item "is" than its base {@code Material}, so in
+ * {@link #classify(ItemStack, RecyclingSettings)} a CopperKingdom copper-armor/
+ * copper-weapon stamp always wins over a {@link #METAL_TABLE} hit on the same item.
+ * This matters concretely: CopperKingdom's copper swords/axes/pickaxes are built on
+ * {@code IRON_SWORD}/{@code IRON_AXE}/{@code IRON_PICKAXE} bases (iron gear IS in
+ * {@link #METAL_TABLE}), stamped with {@code copperkingdom:copper_weapon}. The PDC
+ * check is never gated behind "base material is not already a known metal" -- doing
+ * so would silently classify those copper weapons as iron. (CopperKingdom's armor
+ * happens to be built on {@code LEATHER_*} bases, which are not in
+ * {@link #METAL_TABLE} at all, so this precedence is invisible for armor -- it only
+ * bites for weapons, which is exactly why it was missed before.) See
+ * {@link #resolveBranch} for the exhaustively-tested pure precedence decision.
  */
 public final class MetalClassifier {
 
@@ -175,11 +189,14 @@ public final class MetalClassifier {
      * Classifies a real {@code ItemStack} into a {@link RecycleInput}, or
      * {@link Optional#empty()} if it cannot be used as a recycler input at all.
      *
-     * <p>Reads, in order: the {@code xpfarm:} alloy-stamp PDC keys (an item stamped by
-     * this plugin or another minting alloys under the same contract), the material
-     * table above, CopperKingdom's foreign copper-armor/copper-weapon PDC keys as a
-     * fallback recognition path for that sibling plugin's own copper gear, and
-     * finally durability via {@link Damageable} if the item's meta supports it.
+     * <p>Resolves precedence in this order (see {@link #resolveBranch}): the
+     * {@code xpfarm:} alloy-stamp PDC key (an item stamped by this plugin or another
+     * minting alloys under the same contract) first; then CopperKingdom's foreign
+     * copper-armor/copper-weapon PDC keys, which win over the material table below
+     * even when the base material is already a recognized metal (see the class-level
+     * "PDC precedence beats the material table" note); then the material table;
+     * finally the modifier check. Durability is read via {@link Damageable} if the
+     * item's meta supports it.
      */
     public static Optional<RecycleInput> classify(ItemStack stack, RecyclingSettings settings) {
         Objects.requireNonNull(stack, "stack");
@@ -190,10 +207,24 @@ public final class MetalClassifier {
         boolean isAlloyStamped = MaterialContract.readCustomMaterial(stack).isPresent();
         String alloyId = MaterialContract.readMaterialId(stack).orElse(null);
         boolean damaged = readDamaged(stack);
+        boolean isForeignCopper = MaterialContract.isCopperKingdomCopperArmor(stack)
+                || MaterialContract.isCopperKingdomCopperWeapon(stack);
 
-        if (!isAlloyStamped && metalOf(material).isEmpty() && !isModifier(material)
-                && (MaterialContract.isCopperKingdomCopperArmor(stack)
-                    || MaterialContract.isCopperKingdomCopperWeapon(stack))) {
+        ClassificationBranch branch = resolveBranch(
+                isAlloyStamped, isForeignCopper, metalOf(material).isPresent(), isModifier(material));
+
+        if (branch == ClassificationBranch.FOREIGN_COPPER) {
+            // Do NOT reinstate a "metalOf(material).isEmpty()" guard here. CopperKingdom's
+            // copper swords/axes/pickaxes are minted on IRON_SWORD/IRON_AXE/IRON_PICKAXE
+            // bases (iron gear IS in METAL_TABLE) and stamped with the PDC key
+            // copperkingdom:copper_weapon. If this branch were gated on the base material
+            // not already being a known metal, those copper weapons would fall through to
+            // the METAL_TABLE lookup below and classify as IRON -- a player recycling 5
+            // CopperKingdom copper swords would then wrongly receive iron ingots. The
+            // explicit foreign PDC stamp is more specific evidence than the base material
+            // and must win regardless of what METAL_TABLE says. (CopperKingdom's armor is
+            // built on LEATHER_* bases, which are never in METAL_TABLE, so this precedence
+            // was invisible for armor -- it only bites for weapons.)
             if (damaged && !settings.acceptDamaged()) {
                 return Optional.empty();
             }
@@ -201,6 +232,54 @@ public final class MetalClassifier {
         }
 
         return classify(material, materialId, damaged, isAlloyStamped, alloyId, settings);
+    }
+
+    /**
+     * The winning classification branch, decided purely from boolean facts -- no
+     * {@code Material} or Bukkit type involved. Package-private and exhaustively unit
+     * tested (all 16 combinations) so the precedence order can never regress silently.
+     */
+    enum ClassificationBranch {
+        ALLOY,
+        FOREIGN_COPPER,
+        TABLE_METAL,
+        MODIFIER,
+        UNRECOGNIZED
+    }
+
+    /**
+     * Pure precedence decision backing {@link #classify(ItemStack, RecyclingSettings)}:
+     * given the four boolean facts about an item, decides which classification branch
+     * wins. The order is deliberate and must not change: {@code isAlloyStamped} beats
+     * everything (an alloy remint is never anything else), and {@code isForeignCopper}
+     * beats {@code isTableMetal} -- an explicit foreign PDC stamp is more specific
+     * evidence than a base-material lookup. That second ordering is exactly what makes
+     * CopperKingdom's iron-based copper weapons (stamped
+     * {@code copperkingdom:copper_weapon} on an {@code IRON_SWORD}/{@code IRON_AXE}/
+     * {@code IRON_PICKAXE} base) classify as copper instead of iron; reversing it (as a
+     * "material is not already a known metal" guard would) reintroduces that defect.
+     *
+     * @param isAlloyStamped  whether the item carries the {@code xpfarm:custom_material} PDC marker
+     * @param isForeignCopper whether the item carries a CopperKingdom copper-armor/copper-weapon PDC marker
+     * @param isTableMetal    whether the item's base material is present in {@link #METAL_TABLE}
+     * @param isModifier      whether the item's base material is a modifier (coal/charcoal)
+     * @return the branch that wins, in strict precedence order
+     */
+    static ClassificationBranch resolveBranch(
+            boolean isAlloyStamped, boolean isForeignCopper, boolean isTableMetal, boolean isModifier) {
+        if (isAlloyStamped) {
+            return ClassificationBranch.ALLOY;
+        }
+        if (isForeignCopper) {
+            return ClassificationBranch.FOREIGN_COPPER;
+        }
+        if (isTableMetal) {
+            return ClassificationBranch.TABLE_METAL;
+        }
+        if (isModifier) {
+            return ClassificationBranch.MODIFIER;
+        }
+        return ClassificationBranch.UNRECOGNIZED;
     }
 
     private static boolean readDamaged(ItemStack stack) {
