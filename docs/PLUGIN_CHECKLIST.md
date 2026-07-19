@@ -120,18 +120,57 @@ No gates are intentionally withheld. Status is `active`; the full pipeline runs.
 
 ## 2. Repository
 
-- [ ] Repository is `carmelosantana/minecraft-<slug>` with an SSH `origin` and `main` branch.
-- [ ] Existing user-owned worktree changes were identified and preserved.
-- [ ] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation.
+- [x] Repository is `carmelosantana/minecraft-<slug>` with an SSH `origin` and `main` branch.
+  - Created: <https://github.com/carmelosantana/minecraft-electric-furnace>
+  - `origin` = `git@github.com:carmelosantana/minecraft-electric-furnace.git`, branch `main`
+  - Commit `aa19bd7` pushed to `origin/main` by the operator on 2026-07-19; CI run `29703069182` triggered.
+- [x] Existing user-owned worktree changes were identified and preserved.
+  - New repository, no pre-existing worktree. `git init` ran on a directory containing only gate 1 output.
+- [x] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation.
+  - `rg -n 'herobrinesystems' . --hidden -g '!target/**' -g '!.git/**'` → single hit, which is this checklist's own checkbox text. No real references.
+
+### Open blocker — must be resolved before gate 10
+
+**Repository visibility is still `PRIVATE`; it must be `PUBLIC` before updater
+enrollment.** `gh repo create` defaulted to private. All four sibling plugin repos
+(copper-kingdom, death-depot, curse, starter-pack) are `PUBLIC`, and the updater
+downloads release assets unauthenticated — a private repository fails enrollment.
+
+Verified still private on 2026-07-19 after the push, via
+`gh api repos/carmelosantana/minecraft-electric-furnace` → `private=true`. The
+operator reported having changed it; the change did not take. Re-run:
+
+```bash
+gh repo edit carmelosantana/minecraft-electric-furnace \
+  --visibility public --accept-visibility-change-consequences
+```
+
+This does not block gates 4–7a. It blocks gate 10.
 
 ## 3. Metadata
 
-- [ ] AGPL-3.0-or-later `LICENSE` and Maven license metadata are present and consistent.
-- [ ] `https://xpfarm.org` metadata and Carmelo Santana author metadata are present.
-- [ ] `play.xpfarm.org` is recorded as the public Minecraft server hostname where server identity is documented.
-- [ ] New work uses the `org.xpfarm` Maven group, or an existing-coordinate compatibility decision is documented.
-- [ ] Repository slug, artifact, releasable JAR, updater destination, and `plugin.yml` names are consistent.
-- [ ] No secrets committed in source, defaults, tests, logs, history, or documentation.
+- [x] AGPL-3.0-or-later `LICENSE` and Maven license metadata are present and consistent.
+  - `LICENSE`: full AGPL-3.0 text, 661 lines.
+  - `pom.xml`: `<licenses>` names "GNU Affero General Public License v3.0 or later" at <https://www.gnu.org/licenses/agpl-3.0.html>.
+- [x] `https://xpfarm.org` metadata and Carmelo Santana author metadata are present.
+  - `pom.xml`: `<url>`, `<developers><developer><name>Carmelo Santana`.
+  - `plugin.yml`: `author: Carmelo Santana`, `website: https://xpfarm.org`.
+- [x] `play.xpfarm.org` is recorded as the public Minecraft server hostname where server identity is documented.
+  - `README.md`, with the Java/Bedrock (Geyser + Floodgate) note.
+- [x] New work uses the `org.xpfarm` Maven group, or an existing-coordinate compatibility decision is documented.
+  - `org.xpfarm:electric-furnace:0.1.0`. No compatibility carve-out needed; this is new work.
+- [x] Repository slug, artifact, releasable JAR, updater destination, and `plugin.yml` names are consistent.
+  - slug `electric-furnace` → artifactId `electric-furnace` → JAR `electric-furnace-0.1.0.jar` → destination `electric-furnace.jar` → `plugin.yml` name `ElectricFurnace`. Verified by `grep` on both files.
+- [x] No secrets committed in source, defaults, tests, logs, history, or documentation.
+  - Credential/token/key scan returned only this checklist's own checkbox text.
+
+### Deliberate deviation from the CopperKingdom POM
+
+CopperKingdom's `pom.xml` sets `maven.compiler.release=25` **and** an explicit
+`<source>21</source><target>21</target>` on the compiler plugin. The `release`
+property wins, so the two disagree silently. This POM omits the explicit
+source/target and relies on `maven.compiler.release` alone. The build target is
+unchanged; the contradiction is not propagated.
 
 ## 4. Compatibility
 
@@ -162,9 +201,12 @@ No gates are intentionally withheld. Status is `active`; the full pipeline runs.
 
 ## 8. CI/CD
 
-- [ ] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
+- [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
+  - `.github/workflows/build.yml` copied byte-for-byte from the CopperKingdom reference, which matches `GITHUB_ACTIONS.md`. Triggers: push to `main`, `v*` tags, PRs targeting `main`, `workflow_dispatch`. `actions/checkout@v7`, `actions/setup-java@v5` (Temurin 25, Maven cache), `mvn --batch-mode --no-transfer-progress clean verify`, `SHA256SUMS.txt` excluding `original-*`, `actions/upload-artifact@v7`, tag-gated `gh release view`/`create`/`upload --clobber`.
 - [ ] Successful main Actions run is recorded before tagging.
-- [ ] Workflow permissions contain no broader access than the documented contract.
+  - Not tickable here — this is `minecraft-plugin-release`'s (gate 8b). Additionally **no run exists yet**, because the push was blocked (see §2 blockers).
+- [x] Workflow permissions contain no broader access than the documented contract.
+  - `permissions: contents: write` only. No `packages:`, `id-token:`, or other scopes.
 
 ## 9. Release
 
