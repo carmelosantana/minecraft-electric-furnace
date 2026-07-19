@@ -1,0 +1,114 @@
+/*
+ * ElectricFurnace - a redstone-powered smelter that recycles metal gear into ingots.
+ * Copyright (C) 2026 Carmelo Santana
+ *
+ * This program is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU Affero General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option) any later version.
+ * See the LICENSE file at the project root for the full license text.
+ */
+package org.xpfarm.electricfurnace.config;
+
+import org.bukkit.Sound;
+import org.bukkit.configuration.ConfigurationSection;
+
+import java.util.function.Consumer;
+
+/**
+ * Immutable, fully validated snapshot of {@code config.yml}.
+ *
+ * <p>Built via {@link #load}, which never throws, never disables the plugin, and
+ * never fails startup: any missing, out-of-range, or unparseable value is replaced
+ * with its documented default via {@link ConfigValidator}, and reported through the
+ * supplied warning sink. A server operator with a typo in {@code config.yml} still
+ * gets a fully working plugin.
+ *
+ * @param machine   validated {@code machine} section
+ * @param effects   validated {@code effects} section
+ * @param recycling validated {@code recycling} section
+ */
+public record EfConfig(MachineSettings machine, EffectSettings effects, RecyclingSettings recycling) {
+
+    /** Default sound name for {@code effects.sound}, per the shipping {@code config.yml}. */
+    public static final String DEFAULT_SOUND = "BLOCK_BEACON_AMBIENT";
+
+    /**
+     * Loads and validates configuration from {@code root}.
+     *
+     * @param root the configuration section to read from (typically the plugin's root
+     *             config); may be {@code null}, which is treated as an entirely empty
+     *             configuration -- every key then falls back to its default
+     * @param warn sink for human-readable warning messages naming the offending key,
+     *             value, and substituted default; must not be {@code null}
+     * @return a fully validated, immutable configuration snapshot
+     */
+    public static EfConfig load(ConfigurationSection root, Consumer<String> warn) {
+        MachineSettings machine = new MachineSettings(
+                ConfigValidator.parseDouble("machine.smelt-speed-multiplier",
+                        get(root, "machine.smelt-speed-multiplier"), 1.0, 10.0, 2.0, warn),
+                ConfigValidator.parseInt("machine.fuel-per-operation",
+                        get(root, "machine.fuel-per-operation"), 1, 64, 1, warn),
+                ConfigValidator.parseBoolean("machine.require-redstone-signal",
+                        get(root, "machine.require-redstone-signal"), true, warn),
+                ConfigValidator.parseBoolean("machine.status-bulb.enabled",
+                        get(root, "machine.status-bulb.enabled"), true, warn)
+        );
+
+        EffectSettings effects = new EffectSettings(
+                ConfigValidator.parseBoolean("effects.enabled",
+                        get(root, "effects.enabled"), true, warn),
+                ConfigValidator.parseInt("effects.period-ticks",
+                        get(root, "effects.period-ticks"), 10, 40, 15, warn),
+                ConfigValidator.parseInt("effects.player-radius",
+                        get(root, "effects.player-radius"), 8, 128, 32, warn),
+                resolveSound(get(root, "effects.sound"), warn)
+        );
+
+        RecyclingSettings recycling = new RecyclingSettings(
+                ConfigValidator.parseInt("recycling.slots",
+                        get(root, "recycling.slots"), 1, 9, 5, warn),
+                ConfigValidator.parseInt("recycling.yield-same-metal",
+                        get(root, "recycling.yield-same-metal"), 0, 64, 3, warn),
+                ConfigValidator.parseInt("recycling.yield-mixed-alloy",
+                        get(root, "recycling.yield-mixed-alloy"), 0, 64, 2, warn),
+                ConfigValidator.parseInt("recycling.yield-remelt-alloy",
+                        get(root, "recycling.yield-remelt-alloy"), 0, 64, 1, warn),
+                ConfigValidator.parseBoolean("recycling.accept-damaged",
+                        get(root, "recycling.accept-damaged"), true, warn)
+        );
+
+        return new EfConfig(machine, effects, recycling);
+    }
+
+    private static Object get(ConfigurationSection root, String path) {
+        return root == null ? null : root.get(path);
+    }
+
+    /**
+     * Resolves {@code effects.sound} by name against the {@link Sound} registry.
+     * Unlike every other key in this file, an unresolvable sound name does not fall
+     * back to {@link #DEFAULT_SOUND} -- per the design, it disables sound playback
+     * only, leaving the particle effects untouched. A missing key still falls back
+     * to the default sound, silently.
+     */
+    private static String resolveSound(Object raw, Consumer<String> warn) {
+        if (raw == null) {
+            return DEFAULT_SOUND;
+        }
+        String candidate = String.valueOf(raw);
+        if (resolvesToKnownSound(candidate)) {
+            return candidate;
+        }
+        warn.accept("ElectricFurnace config: key 'effects.sound' has invalid value '" + candidate
+                + "' (does not resolve via the Sound registry); sound disabled, particles unaffected.");
+        return null;
+    }
+
+    private static boolean resolvesToKnownSound(String name) {
+        try {
+            return Sound.class.getField(name).get(null) instanceof Sound;
+        } catch (ReflectiveOperationException e) {
+            return false;
+        }
+    }
+}

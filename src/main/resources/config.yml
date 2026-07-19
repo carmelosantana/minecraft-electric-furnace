@@ -1,0 +1,85 @@
+# ElectricFurnace configuration
+#
+# Balance ceiling (enforced in code, not just documented here): alloy stats must
+# sit between iron and diamond, and must never exceed netherite. Any alloy stat
+# configured above the netherite reference is clamped down to the diamond
+# reference automatically, and a warning is logged naming the alloy, the stat,
+# the configured value, and the clamp.
+#
+# Every key below is validated on load. An out-of-range or unparseable value logs
+# a warning naming the key, the offending value, and the default it was replaced
+# with -- a typo in this file degrades gracefully to defaults, it never stops the
+# plugin from starting.
+
+machine:
+  # Multiplier applied to the base smelt speed. Valid range: 1.0-10.0.
+  smelt-speed-multiplier: 2.0
+  # Redstone dust consumed per completed operation. Valid range: 1-64.
+  fuel-per-operation: 1
+  # Whether the machine requires a redstone signal to run at all. The signal is
+  # the on/off switch; redstone dust is the fuel. See status-bulb below.
+  require-redstone-signal: true
+  status-bulb:
+    # Whether an adjacent COPPER_BULB is driven (via CopperBulb#setLit) to reflect
+    # the machine's current power/fuel state.
+    enabled: true
+
+effects:
+  # Master switch for the particle/sound loop.
+  enabled: true
+  # How often, in ticks, the single global effects task runs. One task serves the
+  # whole server -- there is no per-block scheduled task. Valid range: 10-40.
+  period-ticks: 15
+  # Only players within this many blocks of a running machine receive its effects.
+  # Valid range: 8-128.
+  player-radius: 32
+  # Sound played each effect tick, resolved by name against the Sound registry.
+  # An unresolvable name disables sound only; particles keep playing regardless.
+  sound: BLOCK_BEACON_AMBIENT
+
+recycling:
+  # Number of recycler input slots. Valid range: 1-9.
+  slots: 5
+  # Ingots yielded when all inputs are the same metal, with no modifier (e.g. coal)
+  # present. Valid range: 0-64.
+  yield-same-metal: 3
+  # Alloy ingots yielded for a mixed-metal input -- whether it matches a named
+  # recipe below or falls back to the generic Fused Alloy. Valid range: 0-64.
+  yield-mixed-alloy: 2
+  # Ingots yielded when remelting a single alloy item. This is the only recipe
+  # that accepts fewer than `slots` items. Valid range: 0-64.
+  yield-remelt-alloy: 1
+  # Whether damaged (partially worn) gear is accepted at full yield. Durability is
+  # never scaled into the yield -- giving worn-out gear a worthwhile destination
+  # is a primary purpose of this plugin.
+  accept-damaged: true
+
+# Alloy recipes. This section is a placeholder for Task 2, which defines the
+# AlloyDefinition/AlloyRegistry model and parses these entries -- no code in this
+# task reads this section. Each entry names the distinct inputs (metals and/or
+# the coal modifier) required to produce that alloy, in any order/quantity as
+# long as every listed input is present. `fused_alloy` is the generic fallback
+# for any mixed-metal combination that matches nothing else.
+#
+# Stats (attack damage, attack speed, armor, armor toughness, max durability,
+# enchantability) are added by Task 2. Per the balance ceiling above, no stat may
+# exceed the netherite reference; out-of-range stats are clamped to the diamond
+# reference and logged.
+alloys:
+  steel:
+    display-name: "Steel"
+    inputs: [iron, coal]
+  rose_gold:
+    display-name: "Rose Gold"
+    inputs: [copper, gold]
+  ferrocopper:
+    display-name: "Ferrocopper"
+    inputs: [copper, iron]
+  electrum_steel:
+    display-name: "Electrum Steel"
+    inputs: [gold, iron]
+  fused_alloy:
+    display-name: "Fused Alloy"
+    # Fallback: matches any mixed-metal combination not covered by a named recipe
+    # above (or 3+ distinct metals). Intentionally has no fixed input list.
+    inputs: []
