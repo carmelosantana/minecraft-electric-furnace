@@ -64,9 +64,14 @@ Sections: `machine.*` (smelt speed multiplier, fuel per operation, require-signa
 toggle, status bulb), `effects.*` (enabled, period-ticks, player-radius, sound),
 `recycling.*` (slots, yield-same-metal `3`, yield-mixed-alloy `2`,
 yield-remelt-alloy `1`, accept-damaged), `alloys.<id>.*` (name, lore, color, inputs,
-stat block) and `alloys.balance-ceiling.enabled`. Every numeric key is
-range-validated on load; invalid values warn and fall back to the default rather
-than disabling the plugin. Full table in the design doc.
+stat block). Every numeric key is range-validated on load; invalid values warn and
+fall back to the default rather than disabling the plugin. Full table in the design
+doc.
+
+An earlier draft listed `alloys.balance-ceiling.enabled`. It was **not implemented,
+deliberately** — a ceiling an operator can switch off is not a ceiling. The clamp is
+unconditional in `AlloyRegistry` and warns naming the alloy, stat, configured value,
+and clamp target.
 
 ### Persistence
 
@@ -129,23 +134,12 @@ No gates are intentionally withheld. Status is `active`; the full pipeline runs.
 - [x] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation.
   - `rg -n 'herobrinesystems' . --hidden -g '!target/**' -g '!.git/**'` → single hit, which is this checklist's own checkbox text. No real references.
 
-### Open blocker — must be resolved before gate 10
+### Repository visibility — RESOLVED
 
-**Repository visibility is still `PRIVATE`; it must be `PUBLIC` before updater
-enrollment.** `gh repo create` defaulted to private. All four sibling plugin repos
-(copper-kingdom, death-depot, curse, starter-pack) are `PUBLIC`, and the updater
-downloads release assets unauthenticated — a private repository fails enrollment.
-
-Verified still private on 2026-07-19 after the push, via
-`gh api repos/carmelosantana/minecraft-electric-furnace` → `private=true`. The
-operator reported having changed it; the change did not take. Re-run:
-
-```bash
-gh repo edit carmelosantana/minecraft-electric-furnace \
-  --visibility public --accept-visibility-change-consequences
-```
-
-This does not block gates 4–7a. It blocks gate 10.
+`gh repo create` defaulted to private, which would have failed updater enrollment
+(the updater downloads release assets unauthenticated). Made public by the operator
+and verified 2026-07-19 via `gh api repos/carmelosantana/minecraft-electric-furnace`
+→ `private=false visibility=public`.
 
 ## 3. Metadata
 
