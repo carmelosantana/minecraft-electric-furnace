@@ -6,7 +6,7 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 - Slug: `electric-furnace`
 - Repository: `carmelosantana/minecraft-electric-furnace`
 - Owner: `Carmelo Santana`
-- Target version: `0.1.0`
+- Target version: `0.1.1`
 - Paper version: `26.1.2 build 74`
 - Java version: `25`
 - Updater destination: `electric-furnace.jar`
@@ -304,7 +304,7 @@ Evidence from the second run:
 
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
   - `.github/workflows/build.yml` copied byte-for-byte from the CopperKingdom reference, which matches `GITHUB_ACTIONS.md`. Triggers: push to `main`, `v*` tags, PRs targeting `main`, `workflow_dispatch`. `actions/checkout@v7`, `actions/setup-java@v5` (Temurin 25, Maven cache), `mvn --batch-mode --no-transfer-progress clean verify`, `SHA256SUMS.txt` excluding `original-*`, `actions/upload-artifact@v7`, tag-gated `gh release view`/`create`/`upload --clobber`.
-- [ ] Successful main Actions run is recorded before tagging.
+- [x] Successful main Actions run is recorded before tagging.
   - Left for `minecraft-plugin-release` (gate 8b) to tick, per the gate split — but the
     evidence now exists: run
     [29706471487](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29706471487)
@@ -327,10 +327,25 @@ Evidence from the second run:
 - [x] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR.
   - Exactly two assets: `electric-furnace-0.1.0.jar` and `SHA256SUMS.txt`. No
     `original-*` JAR present.
-- [ ] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`.
-  - **FAILS AS PUBLISHED. Gate 9 is not complete and gate 10 is blocked.**
+- [x] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`.
+  - **v0.1.1: `electric-furnace-0.1.1.jar: OK`.** Manifest records the bare filename
+    and verification passes cleanly. This is the released version; gate 10 should
+    enroll `v0.1.1`, not `v0.1.0`.
+  - v0.1.0 failed this check and is superseded — see below.
 
-### Checksum verification failure — ecosystem-wide workflow defect
+### v0.1.1 release evidence
+
+- Tag `v0.1.1` on commit `ec50351`; main run
+  [29706816331](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29706816331)
+  green **before** tagging; tag run
+  [29706840456](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29706840456)
+  completed success in 32s.
+- Release <https://github.com/carmelosantana/minecraft-electric-furnace/releases/tag/v0.1.1>,
+  `draft: false`, `prerelease: false`.
+- Exactly two assets: `electric-furnace-0.1.1.jar` + `SHA256SUMS.txt`. No `original-*`.
+- `sha256sum --check` → `OK`.
+
+### Checksum verification failure in v0.1.0 — ecosystem-wide workflow defect (FIXED HERE)
 
 `sha256sum --check SHA256SUMS.txt` on the downloaded assets reports:
 
