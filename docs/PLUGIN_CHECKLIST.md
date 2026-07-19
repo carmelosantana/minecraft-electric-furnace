@@ -383,10 +383,32 @@ convention shared by ten repositories.
 
 ## 10. Updater
 
-- [ ] Updater manifest/tests cover repository, destination, anchored asset regex, legacy globs, enabled state, and optional pin.
-- [ ] Fresh install, upgrade, no-op, legacy archival, endpoint failure, and checksum failure behaviors pass.
-- [ ] Updater dry-run uses a disposable directory and never a production plugin directory.
-- [ ] Failure retains the installed JAR and default fail-open behavior permits Minecraft startup.
+- [x] Updater manifest/tests cover repository, destination, anchored asset regex, legacy globs, enabled state, and optional pin.
+  - Enrolled in `carmelosantana/minecraft-plugin-updater` commit `43f5bb7`.
+  - `repo` `carmelosantana/minecraft-electric-furnace`; `destination` `electric-furnace.jar`
+    (unique across all 11 entries, verified); `asset_regex` `^electric-furnace-[0-9].*\.jar$`;
+    `legacy_globs` `["electric-furnace-[0-9]*.jar"]`; `enabled` absent (= true); **no pin**,
+    deliberately — the entry follows the latest stable release.
+  - Regex verified to select exactly one asset: matches `electric-furnace-0.1.1.jar`;
+    rejects `SHA256SUMS.txt`, `original-electric-furnace-0.1.1.jar`, and other plugins' JARs.
+  - `python3 -m json.tool plugins.json` valid; `python3 -m unittest discover -s tests` 11/11 OK.
+- [x] Fresh install, upgrade, no-op, legacy archival, endpoint failure, and checksum failure behaviors pass.
+  - **Fresh install:** resolves `v0.1.1`; installed JAR SHA-256
+    `3e1532e8a929dd014ddc6b027fc6bc69615a225bde8d96acf304b9fc926eacae` matches the
+    published `SHA256SUMS.txt` bit for bit — release-to-install verified end to end.
+  - **No-op:** second real run reports `already current (v0.1.1)`.
+  - **Upgrade:** stale bytes at the destination trigger a reinstall.
+  - **Legacy glob:** selects a versioned leftover (`electric-furnace-0.0.9.jar`) while
+    correctly excluding the destination filename it just installed.
+  - **Endpoint failure:** a 404 repo logs `WARNING: ... keeping installed JAR`, exits 0
+    (fail-open), leaves the destination JAR untouched, and the other ten plugins still process.
+  - **Checksum failure:** covered by the updater's own unit suite (11/11 OK), not re-derived here.
+- [x] Updater dry-run uses a disposable directory and never a production plugin directory.
+  - All runs used `/tmp/minecraft-plugin-updater-dry-run`. Every non-dry-run invocation
+    overrode all three of `--plugins-dir`, `--state-file`, and `--backup-dir` into that
+    sandbox, so nothing touched the `/minecraft` production volume. Tree deleted afterward.
+- [x] Failure retains the installed JAR and default fail-open behavior permits Minecraft startup.
+  - Confirmed by the endpoint-failure case above: exit 0, JAR retained, batch continued.
 
 ## 11. Deployment
 
