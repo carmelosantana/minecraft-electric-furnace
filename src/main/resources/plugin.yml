@@ -1,0 +1,27 @@
+name: ElectricFurnace
+version: '${project.version}'
+main: org.xpfarm.electricfurnace.ElectricFurnacePlugin
+api-version: '1.21'
+author: Carmelo Santana
+website: https://xpfarm.org
+description: Redstone-powered smelter that recycles metal gear into ingots and fuses mixed metals into alloys
+
+commands:
+  electricfurnace:
+    description: Manage and inspect Electric Furnaces
+    usage: /electricfurnace <give|alloy|reload|info>
+    aliases: [ef]
+
+permissions:
+  electricfurnace.use:
+    description: Open and use an Electric Furnace
+    default: true
+  electricfurnace.craft:
+    description: Craft the Electric Furnace item
+    default: true
+  electricfurnace.give:
+    description: Issue Electric Furnace items and alloy ingots
+    default: op
+  electricfurnace.reload:
+    description: Reload the ElectricFurnace configuration
+    default: op
