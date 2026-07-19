@@ -316,10 +316,61 @@ Evidence from the second run:
 
 ## 9. Release
 
-- [ ] Semantic version matches the POM, plugin metadata, and `v<version>` tag.
-- [ ] Successful tag Actions run and GitHub release are recorded.
-- [ ] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR.
+- [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag.
+  - POM `0.1.0`; `plugin.yml` uses `version: '${project.version}'` (no hardcoded drift);
+    embedded `plugin.yml` in the shaded JAR reads `0.1.0`; tag `v0.1.0` → `db344e5`.
+- [x] Successful tag Actions run and GitHub release are recorded.
+  - Tag run [29706675169](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29706675169)
+    completed **success** in 31s. Release published 2026-07-19T22:44:24Z by
+    `github-actions[bot]`, `draft: false`, `prerelease: false`:
+    <https://github.com/carmelosantana/minecraft-electric-furnace/releases/tag/v0.1.0>
+- [x] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR.
+  - Exactly two assets: `electric-furnace-0.1.0.jar` and `SHA256SUMS.txt`. No
+    `original-*` JAR present.
 - [ ] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`.
+  - **FAILS AS PUBLISHED. Gate 9 is not complete and gate 10 is blocked.**
+
+### Checksum verification failure — ecosystem-wide workflow defect
+
+`sha256sum --check SHA256SUMS.txt` on the downloaded assets reports:
+
+```
+sha256sum: target/electric-furnace-0.1.0.jar: No such file or directory
+target/electric-furnace-0.1.0.jar: FAILED open or read
+```
+
+**The JAR itself is intact.** Its actual SHA-256 is
+`b65e12588410b86b172b6d6dba6af797355fcd5e953c14dc9cd897196e4a395e`, which matches the
+recorded digest exactly. Stripping the path prefix makes the check report `OK`.
+
+The defect is in the workflow's checksum step. `.github/workflows/build.yml` runs:
+
+```bash
+find target -maxdepth 1 -name '*.jar' ! -name 'original-*' -print0 | sort -z | xargs -0 sha256sum > target/SHA256SUMS.txt
+```
+
+`sha256sum` records whatever path it was given, so the manifest contains the
+build-time path `target/electric-furnace-0.1.0.jar`. Release assets download flat,
+so the recorded path never resolves and verification always fails.
+
+**This is not specific to this plugin.** The workflow was copied byte-for-byte from
+the CopperKingdom reference, which matches `GITHUB_ACTIONS.md`. Verified against the
+latest published releases of three siblings — all carry the same `target/` prefix:
+
+| Plugin | Published `SHA256SUMS.txt` entry |
+|---|---|
+| copper-kingdom | `…  target/copper-kingdom-0.2.0.jar` |
+| death-depot | `…  target/death-depot-1.1.0.jar` |
+| curse | `…  target/curse-0.2.0.jar` |
+
+Every plugin release in the ecosystem therefore fails gate 9's checksum requirement
+as published. The fix belongs in the shared standard (`GITHUB_ACTIONS.md` and every
+repository's `build.yml`), not in this plugin alone — e.g. `cd target && sha256sum
+*.jar` or piping through `basename`.
+
+Escalated to the operator rather than resolved unilaterally: the remedy requires
+either moving an already-published tag or burning a version number, and it changes a
+convention shared by ten repositories.
 
 ## 10. Updater
 
