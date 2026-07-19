@@ -9,7 +9,7 @@ description: Redstone-powered smelter that recycles metal gear into ingots and f
 commands:
   electricfurnace:
     description: Manage and inspect Electric Furnaces
-    usage: /electricfurnace <give|alloy|reload|info>
+    usage: /electricfurnace <give [player] [amount] | alloy <id> [amount] | reload | info>
     aliases: [ef]
 
 permissions:

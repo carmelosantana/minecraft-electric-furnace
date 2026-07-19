@@ -287,6 +287,55 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
         return List.of();
     }
 
+    /**
+     * The usernames to try, in order, for a typed {@code give} target.
+     *
+     * <p>Floodgate joins a Bedrock account under a prefixed username -- {@code .acarm}
+     * for a player who thinks of themselves as {@code acarm} -- and
+     * {@link Bukkit#getPlayerExact(String)} is an exact match, so an operator naming the
+     * unprefixed form gets "not online" for a player standing in front of them. Trying
+     * the prefixed form as well costs one lookup and removes the single most confusing
+     * failure this command has. The prefix is the Floodgate default; a server that has
+     * changed it still resolves through the case-insensitive fallback in
+     * {@link #resolveTarget}.
+     *
+     * @param typed the raw name argument
+     * @return candidate usernames, most likely first; empty for a null or blank input
+     */
+    public static List<String> targetNameCandidates(String typed) {
+        if (typed == null) {
+            return List.of();
+        }
+        String trimmed = typed.trim();
+        if (trimmed.isEmpty()) {
+            return List.of();
+        }
+        if (trimmed.startsWith(FLOODGATE_PREFIX)) {
+            return List.of(trimmed);
+        }
+        return List.of(trimmed, FLOODGATE_PREFIX + trimmed);
+    }
+
+    /** The Floodgate default prefix on a Bedrock account's Java-side username. */
+    private static final String FLOODGATE_PREFIX = ".";
+
+    /**
+     * The message shown when no online player matches {@code typed}.
+     *
+     * <p>Naming who <em>is</em> online turns a dead end into a usable correction: it is
+     * the only way an operator discovers a Floodgate-prefixed username without knowing
+     * Floodgate exists.
+     *
+     * @param typed      the name the sender typed
+     * @param onlineNames the usernames currently online
+     */
+    public static String noSuchPlayerMessage(String typed, List<String> onlineNames) {
+        if (onlineNames == null || onlineNames.isEmpty()) {
+            return "No player matches '" + typed + "'; no players are online.";
+        }
+        return "No player matches '" + typed + "'. Online: " + String.join(", ", onlineNames);
+    }
+
     private static List<String> filterByPrefix(List<String> candidates, String partial) {
         String prefix = partial == null ? "" : partial.toLowerCase(Locale.ROOT);
         List<String> matches = new ArrayList<>();
@@ -438,19 +487,34 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
      */
     private Optional<Player> resolveTarget(CommandSender sender, String namedTarget) {
         if (namedTarget != null) {
-            Player player = Bukkit.getPlayerExact(namedTarget);
-            if (player == null) {
-                sender.sendMessage(Component.text("Player '" + namedTarget + "' is not online.")
-                        .color(NamedTextColor.RED));
-                return Optional.empty();
+            for (String candidate : targetNameCandidates(namedTarget)) {
+                Player player = Bukkit.getPlayerExact(candidate);
+                if (player != null) {
+                    return Optional.of(player);
+                }
             }
-            return Optional.of(player);
+            // Last resort: a case-insensitive sweep, which also covers a server that has
+            // reconfigured Floodgate's username prefix away from the default.
+            for (String candidate : targetNameCandidates(namedTarget)) {
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    if (online.getName().equalsIgnoreCase(candidate)) {
+                        return Optional.of(online);
+                    }
+                }
+            }
+            List<String> onlineNames = new ArrayList<>();
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                onlineNames.add(online.getName());
+            }
+            sender.sendMessage(Component.text(noSuchPlayerMessage(namedTarget, onlineNames))
+                    .color(NamedTextColor.RED));
+            return Optional.empty();
         }
         if (sender instanceof Player player) {
             return Optional.of(player);
         }
-        sender.sendMessage(Component.text("Console must name a player to give to.")
-                .color(NamedTextColor.RED));
+        sender.sendMessage(Component.text("Console has no inventory; name a player, e.g. "
+                + "/electricfurnace give <player>.").color(NamedTextColor.RED));
         return Optional.empty();
     }
 

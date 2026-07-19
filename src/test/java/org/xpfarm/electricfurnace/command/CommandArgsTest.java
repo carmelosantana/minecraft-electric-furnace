@@ -382,4 +382,64 @@ class CommandArgsTest {
             }
         }
     }
+
+    /**
+     * Resolving a typed {@code give} target name.
+     *
+     * <p>The operator who first ran this command in production typed a bare Java-style
+     * name for a Floodgate Bedrock account, whose real username carries a {@code .}
+     * prefix. {@code Bukkit.getPlayerExact} matched nothing and the only feedback was
+     * "not online", which reads as the command doing nothing at all. These cases pin
+     * the candidate list and the failure message that replaced it.
+     */
+    @Nested
+    @DisplayName("give target resolution")
+    class TargetResolution {
+
+        @Test
+        @DisplayName("a bare name also tries the Floodgate '.' prefix")
+        void bareNameTriesFloodgatePrefix() {
+            assertEquals(List.of("carm", ".carm"),
+                    ElectricFurnaceCommand.targetNameCandidates("carm"));
+        }
+
+        @Test
+        @DisplayName("an already-prefixed name is not prefixed twice")
+        void prefixedNameIsNotDoubled() {
+            assertEquals(List.of(".acarm"),
+                    ElectricFurnaceCommand.targetNameCandidates(".acarm"));
+        }
+
+        @Test
+        @DisplayName("surrounding whitespace is trimmed")
+        void whitespaceIsTrimmed() {
+            assertEquals(List.of("carm", ".carm"),
+                    ElectricFurnaceCommand.targetNameCandidates("  carm  "));
+        }
+
+        @Test
+        @DisplayName("null and blank yield no candidates")
+        void nullAndBlankYieldNothing() {
+            assertTrue(ElectricFurnaceCommand.targetNameCandidates(null).isEmpty());
+            assertTrue(ElectricFurnaceCommand.targetNameCandidates("   ").isEmpty());
+        }
+
+        @Test
+        @DisplayName("the failure message lists who is actually online")
+        void failureMessageListsOnlinePlayers() {
+            String message = ElectricFurnaceCommand.noSuchPlayerMessage("carm",
+                    List.of(".acarm", "Steve"));
+            assertTrue(message.contains("carm"), message);
+            assertTrue(message.contains(".acarm"), message);
+            assertTrue(message.contains("Steve"), message);
+        }
+
+        @Test
+        @DisplayName("the failure message says so plainly when nobody is online")
+        void failureMessageWhenNobodyOnline() {
+            String message = ElectricFurnaceCommand.noSuchPlayerMessage("carm", List.of());
+            assertTrue(message.contains("carm"), message);
+            assertTrue(message.toLowerCase(java.util.Locale.ROOT).contains("no players"), message);
+        }
+    }
 }
