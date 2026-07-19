@@ -24,6 +24,7 @@ import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -41,7 +42,12 @@ import java.util.function.Supplier;
  */
 public final class RedstoneListener implements Listener {
 
-    private static final BlockFace[] ADJACENT_FACES = {
+    /**
+     * The six axis-aligned faces scanned for adjacent machines. Package-private so
+     * {@code RedstoneListenerTest} can assert it enumerates exactly
+     * {@link #neighbourOffsets}.
+     */
+    static final BlockFace[] ADJACENT_FACES = {
             BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST, BlockFace.UP, BlockFace.DOWN
     };
 
@@ -56,21 +62,79 @@ public final class RedstoneListener implements Listener {
         this.alloysSupplier = Objects.requireNonNull(alloysSupplier, "alloysSupplier");
     }
 
+    /**
+     * Reacts to a redstone current change by updating every <em>adjacent</em> registered
+     * machine.
+     *
+     * <p><b>The event block is the redstone component, never the machine.</b>
+     * {@code BlockRedstoneEvent} fires on the wire, torch, or repeater whose current
+     * changed. A blast furnace is not a redstone-sensitive block, so it never fires this
+     * event itself -- testing {@code machines.isMachine(event.getBlock())} could
+     * therefore never be true, making the whole handler dead code: the copper bulb never
+     * lit and the "redstone changed, re-attempt processing" path never ran. The machine
+     * to act on is a <em>neighbour</em> of the event block, so all six neighbours are
+     * scanned (see {@link #neighbourOffsets}).
+     */
     @EventHandler
     public void onRedstoneChange(BlockRedstoneEvent event) {
-        Block block = event.getBlock();
-        if (!machines.isMachine(block)) {
-            return;
-        }
-
-        boolean powered = event.getNewCurrent() > 0;
+        Block source = event.getBlock();
         EfConfig config = configSupplier.get();
 
-        if (config.machine().statusBulbEnabled()) {
-            updateAdjacentBulb(block, powered);
-        }
+        for (BlockFace face : ADJACENT_FACES) {
+            Block machine = source.getRelative(face);
+            if (!machines.isMachine(machine)) {
+                continue;
+            }
 
-        reattemptProcessingForViewers(block, config, powered);
+            boolean powered = poweredAfterChange(event.getNewCurrent(), machine.getBlockPower());
+
+            if (config.machine().statusBulbEnabled()) {
+                updateAdjacentBulb(machine, powered);
+            }
+            reattemptProcessingForViewers(machine, config, powered);
+        }
+    }
+
+    /**
+     * Whether an adjacent machine should be treated as powered, given the changing
+     * component's new current and the machine's own currently-reported block power.
+     *
+     * <p>The OR matters on the rising edge: {@code BlockRedstoneEvent} fires
+     * <em>before</em> the world applies the new current, so
+     * {@link Block#getBlockPower()} on the machine can still report the stale value and
+     * would miss the change that just powered it. Conversely, on a falling edge the
+     * machine may still be powered by some other adjacent source, which is exactly what
+     * {@code otherPower} reports. Pure integer logic, unit tested.
+     */
+    static boolean poweredAfterChange(int newCurrent, int otherPower) {
+        return newCurrent > 0 || otherPower > 0;
+    }
+
+    /**
+     * A block offset by one along a single axis.
+     *
+     * @param dx x offset
+     * @param dy y offset
+     * @param dz z offset
+     */
+    record Offset(int dx, int dy, int dz) {
+    }
+
+    /**
+     * The six axis-aligned neighbour offsets ({@code +-x, +-y, +-z}) that
+     * {@link #onRedstoneChange} scans for registered machines.
+     *
+     * <p>Exists as a pure function over plain ints so the neighbour enumeration -- the
+     * part of the S1 fix that is easy to get subtly wrong (a missing face, a duplicated
+     * one, a diagonal) -- is verifiable with no running server. {@link #ADJACENT_FACES}
+     * is asserted against this set in {@code RedstoneListenerTest}, which is what ties
+     * the tested enumeration to the {@code BlockFace} array actually used at runtime.
+     */
+    static List<Offset> neighbourOffsets() {
+        return List.of(
+                new Offset(1, 0, 0), new Offset(-1, 0, 0),
+                new Offset(0, 1, 0), new Offset(0, -1, 0),
+                new Offset(0, 0, 1), new Offset(0, 0, -1));
     }
 
     private void updateAdjacentBulb(Block machine, boolean powered) {

@@ -292,3 +292,201 @@ one level removed (via a static initializer rather than a method parameter).
   case. Given bundles are an uncommon interaction with a furnace-style GUI, this was
   judged an acceptable, safety-first trade-off rather than worth the risk of guessing
   wrong.
+
+---
+
+## Task 5 review-findings fix pass
+
+One pass covering the complete findings list (S1, C1, C2, I1-I4, M1-M5).
+
+### S1 - RedstoneListener reacted to the wrong block
+
+`BlockRedstoneEvent` fires on the redstone component (wire/torch/repeater), never on a
+blast furnace, so `machines.isMachine(event.getBlock())` could never be true and the
+whole handler was dead code: the copper bulb never lit and the re-attempt-processing
+path never ran.
+
+`onRedstoneChange` now scans the six axis-aligned neighbours of the event block and acts
+on each registered machine found. The neighbour enumeration is extracted as the pure
+`neighbourOffsets()` returning a `record Offset(int dx, int dy, int dz)`, and
+`ADJACENT_FACES` was made package-private so `RedstoneListenerTest` asserts the
+`BlockFace` array used at runtime enumerates exactly those six offsets (`BlockFace`'s
+`getModX/Y/Z` are pure, so no server is needed).
+
+Also added the pure `poweredAfterChange(newCurrent, otherPower)`: the event fires
+*before* the world applies the new current, so the machine's own `getBlockPower()` can
+read stale on the rising edge; the OR covers that while still respecting other adjacent
+power sources on the falling edge.
+
+### C1 (critical) - double-click collect duplicated items
+
+`COLLECT_TO_CURSOR` is classified take-only, so it passed the per-slot guard on
+INPUT/FUEL/OUTPUT, and when the clicked inventory was the player's own only
+`MOVE_TO_OTHER_INVENTORY` was cancelled. It is not a single-slot action: it vacuums
+matching stacks from the entire view. Exploit confirmed against the source: hold a gray
+stained glass pane, double-click in your own inventory, collect up to 20 filler panes,
+which `FurnaceGui.open()` re-mints on the next open. Same trick on the fuel slot
+vacuumed the status indicator, which `refreshIndicator` re-mints.
+
+Added `shouldCancelViewWide(InventoryAction)`, checked in `onClick` immediately after the
+"top is a furnace GUI" test - before the clicked-inventory split and before the
+`clicked == null` early return - so `COLLECT_TO_CURSOR` is cancelled unconditionally
+whenever the top inventory is a furnace GUI, regardless of which inventory was clicked.
+
+### C2 (critical) - closeAll() destroyed every open GUI's contents on shutdown
+
+`closeAll()` relied on `closeInventory()` firing `InventoryCloseEvent` into
+`MachineGuiListener#onClose`. During `onDisable` that handler does not run:
+`JavaPlugin.setEnabled(false)` clears `isEnabled` *before* invoking `onDisable()`, and
+`SimplePluginManager#fireEvent` skips every `RegisteredListener` whose plugin is
+disabled. Every input, fuel, and output item was silently destroyed on shutdown.
+
+`closeAll()` now calls `returnAllItems(top, player)` directly, before `closeInventory()`.
+`returnAllItems` nulls each slot as it drains, so a double-return via the event handler
+(when the plugin *is* enabled) returns nothing the second time - idempotent, never
+duplicating. `closeForBlock` left as-is: it runs while enabled and was correct.
+
+To make this testable without event dispatch, the per-viewer sequence is data:
+`shutdownSteps()` returns `[RETURN_ITEMS, CLOSE_INVENTORY]` and `closeAll` drives
+directly off it, so deleting the return step or reordering it after the close fails
+`FurnaceGuiTest`.
+
+### I1 - permission-denied place consumed the machine item
+
+A player without `electricfurnace.use` got the block placed and the item consumed but no
+registration - the special item silently became a plain blast furnace. `onPlace` now
+cancels the event and sends an explanatory red message, keeping the item in hand.
+
+### I2 - oversized stack into an empty output slot
+
+`classifyOutputSlot` returned `EMPTY` without checking the candidate against
+`maxStackSize`; `depositOutput` then `setItem`-ed an oversized stack. The EMPTY branch
+now returns `DIFFERENT_ITEM` when `candidate.getAmount() > candidate.getMaxStackSize()`
+(and when the candidate is null), matching the guard the SAME_ITEM branch already had.
+
+### I3 - IllegalStateException from inside a scheduled task
+
+`candidateItemFor`/`alloyStack` threw on an unknown alloy id, from a task scheduled off a
+click - the scheduler swallows it and the operation aborts partway through. Both now
+return `null`; `alloyStack` logs a warning naming the alloy id and pointing at the
+`alloys` config section, and `tryProcess` treats a null candidate exactly like a rejected
+run (no fuel consumed, no inputs consumed, no output written).
+
+### I4 - shift-click into the GUI: MANUAL ROUTING IMPLEMENTED
+
+**Implemented manual routing; did not keep the blanket cancel.**
+
+Bukkit's `MOVE_TO_OTHER_INVENTORY` picks the destination internally and will use the
+output slot when it is the only empty top slot, so Bukkit's own move is still always
+cancelled. But `handleShiftClickIn` then performs the move itself, so the UX is kept:
+filling the inputs is one click instead of five, which matters on Bedrock.
+
+Routing decision is the pure `shiftTargetOf(isRedstone, isRecyclable) -> FUEL|INPUT|NONE`
+(redstone wins; unrecognized items route nowhere rather than being forced somewhere).
+The insertion is `FurnaceGui.insertIntoFuel` / `insertIntoInputs`, which address slots by
+name via `GuiLayout` and have no code path reaching OUTPUT, INDICATOR, or FILLER - the
+enum's codomain is itself the safety argument, and is asserted as such in the tests.
+Inputs are filled vanilla-style: top up matching stacks first, then claim empty slots.
+
+Item-safety of the manual move rests on the pure `FurnaceGui.transferAmount(sourceAmount,
+destAmount, maxStackSize)`, tested exhaustively over a 71x71 grid for the two invariants
+that matter: never move more than the source holds (no duplication) and never push the
+destination past its max (no overflow), and never negative (which would silently *add*
+items to the source). The moving stack is cloned before insertion so the player's real
+slot item is never aliased into the GUI; it is written back exactly once with the
+remainder, or nulled when fully consumed.
+
+### M1 - vacuous assertion
+
+`assertEquals(effect, effect)` replaced with `assertNotNull(classify(action))`, which
+asserts something real: no `InventoryAction` falls through unclassified.
+
+### M2 - tests that restated the implementation
+
+Three tests derived their `expected` value from the implementation's own expression, so
+they passed against any implementation matching that restatement. All rewritten against
+independently-derived tables:
+
+- `mayRun_everyCombination` -> `mayRun_matchesTheHandWrittenTruthTable`, all 24 outcomes
+  written out literally, plus an exhaustiveness check on the table's own size.
+- `indicatorState_everyCombination` -> `indicatorState_matchesTheHandWrittenTruthTable`,
+  all 8 outcomes literal, plus size check.
+- `shouldCancel_everyRoleAndPlaceTakeCombination` -> `shouldCancel_matchesTheHandWritten
+  TruthTable`, all 20 outcomes literal, plus a size check that fails if a `SlotRole` is
+  added without updating the table.
+- `shouldCancel_everyRoleActionCombination` kept but re-based on a hand-maintained
+  `PLACING_ACTIONS` set instead of `classify()`'s own output, so a mistake in `classify`
+  now surfaces as a failure here rather than being mirrored into the expectation.
+
+### M3 - meaningless ignoreCancelled
+
+Removed `ignoreCancelled = true` from `onClose`; `InventoryCloseEvent` is not
+`Cancellable`.
+
+### M4 - next-tick guard checked the wrong thing
+
+The scheduled guard checked that the player had *some* furnace GUI open, not *this* one.
+It now compares `blockOf(player.getOpenInventory().getTopInventory())` against the block
+captured at schedule time, so a player who closed this GUI and opened a different
+machine's within the tick no longer has the wrong inventory processed against the wrong
+block's power.
+
+### M5 - only BlockBreakEvent unregistered
+
+Explosions and pistons removed or moved the block without unregistering, orphaning the
+registry entry and losing the machine item. Added:
+
+- `EntityExplodeEvent` and `BlockExplodeEvent`: registered machines are pulled out of the
+  explosion's block list (so vanilla neither processes them nor rolls the yield chance
+  for a plain blast furnace drop), then broken deliberately - viewers force-closed,
+  unregistered, block set to AIR, machine item dropped unconditionally.
+- `BlockPistonExtendEvent` and `BlockPistonRetractEvent`: **cancelled** rather than
+  broken-and-dropped. Deliberate deviation from the finding's suggested treatment: a
+  piston does not destroy the block, so there is nothing to salvage. Cancelling keeps the
+  machine intact, registered, and where the player built it, and prevents the orphaned
+  entry outright. Breaking it into a dropped item instead would turn a redstone
+  contraption brushing a furnace into silent disassembly of the player's base.
+
+### Not unit-testable here
+
+I2's `classifyOutputSlot` and I4's `insertIntoFuel`/`insertIntoInputs` take real
+`ItemStack`s, which cannot be constructed without a live server (Paper resolves item
+types through `RegistryAccess`). Their decisions are covered indirectly by the pure
+functions they delegate to (`transferAmount`, `mayRun`); the `ItemStack`-level glue is
+runtime-verified only, consistent with the existing split in `MetalClassifier`.
+
+### Test-quality check
+
+To confirm the new regression tests are not vacuous, three targeted mutations were
+introduced and the suite re-run: `shouldCancelViewWide` forced to `false`, the
+`DIFFERENT_ITEM` term dropped from `mayRun`, and `RETURN_ITEMS` removed from
+`shutdownSteps()`. Result: 6 failures across `MachineGuiListenerTest` (2) and
+`FurnaceGuiTest` (4). Mutations reverted, suite green again.
+
+### Verification
+
+Command:
+
+```
+mvn --batch-mode --no-transfer-progress clean verify
+```
+
+Actual output (per-class test counts and result):
+
+```
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.item.MetalClassifierTest
+[INFO] Tests run: 32, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.machine.MachineKeyTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.recycle.RecycleResolverTest
+[INFO] Tests run: 20, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.config.ConfigValidatorTest
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.listener.RedstoneListenerTest
+[INFO] Tests run: 35, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.listener.MachineGuiListenerTest
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.gui.GuiLayoutTest
+[INFO] Tests run: 25, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.gui.FurnaceGuiTest
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0 -- in org.xpfarm.electricfurnace.alloy.AlloyRegistryTest
+
+[INFO] Results:
+[INFO] Tests run: 183, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+183 tests, up from 150; all 150 pre-existing tests still green.

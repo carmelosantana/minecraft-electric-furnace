@@ -11,6 +11,8 @@ package org.xpfarm.electricfurnace.gui;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,21 +61,66 @@ class FurnaceGuiTest {
         assertFalse(FurnaceGui.mayRun(true, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM));
     }
 
+    /**
+     * The complete {@code mayRun} truth table, written out by hand.
+     *
+     * <p>Rows are {@code {powered, requireSignal, hasFuel, outputSlotState, expected}}.
+     * Deliberately NOT derived from the implementation's own boolean expression: an
+     * "expected" value that restates the implementation passes against any
+     * implementation matching that restatement, wrong ones included. All 24 outcomes are
+     * therefore spelled out literally.
+     */
+    private static final Object[][] MAY_RUN_TABLE = {
+            // Powered, signal required -- runs only with fuel and a non-blocking output.
+            {true, true, true, FurnaceGui.OutputSlotState.EMPTY, true},
+            {true, true, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
+            {true, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+            {true, true, false, FurnaceGui.OutputSlotState.EMPTY, false},
+            {true, true, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
+            {true, true, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+
+            // Powered, signal not required -- same as above; power is moot.
+            {true, false, true, FurnaceGui.OutputSlotState.EMPTY, true},
+            {true, false, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
+            {true, false, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+            {true, false, false, FurnaceGui.OutputSlotState.EMPTY, false},
+            {true, false, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
+            {true, false, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+
+            // Unpowered, signal required -- never runs, whatever else is true.
+            {false, true, true, FurnaceGui.OutputSlotState.EMPTY, false},
+            {false, true, true, FurnaceGui.OutputSlotState.SAME_ITEM, false},
+            {false, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+            {false, true, false, FurnaceGui.OutputSlotState.EMPTY, false},
+            {false, true, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
+            {false, true, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+
+            // Unpowered but signal not required -- runs on fuel + non-blocking output.
+            {false, false, true, FurnaceGui.OutputSlotState.EMPTY, true},
+            {false, false, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
+            {false, false, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+            {false, false, false, FurnaceGui.OutputSlotState.EMPTY, false},
+            {false, false, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
+            {false, false, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
+    };
+
     @Test
-    void mayRun_everyCombination() {
-        for (boolean powered : new boolean[] {true, false}) {
-            for (boolean requireSignal : new boolean[] {true, false}) {
-                for (boolean hasFuel : new boolean[] {true, false}) {
-                    for (FurnaceGui.OutputSlotState state : FurnaceGui.OutputSlotState.values()) {
-                        boolean expected = (!requireSignal || powered) && hasFuel
-                                && state != FurnaceGui.OutputSlotState.DIFFERENT_ITEM;
-                        assertEquals(expected, FurnaceGui.mayRun(powered, requireSignal, hasFuel, state),
-                                () -> "powered=" + powered + " requireSignal=" + requireSignal
-                                        + " hasFuel=" + hasFuel + " state=" + state);
-                    }
-                }
-            }
+    void mayRun_matchesTheHandWrittenTruthTable() {
+        for (Object[] row : MAY_RUN_TABLE) {
+            boolean powered = (Boolean) row[0];
+            boolean requireSignal = (Boolean) row[1];
+            boolean hasFuel = (Boolean) row[2];
+            FurnaceGui.OutputSlotState state = (FurnaceGui.OutputSlotState) row[3];
+            boolean expected = (Boolean) row[4];
+            assertEquals(expected, FurnaceGui.mayRun(powered, requireSignal, hasFuel, state),
+                    () -> "powered=" + powered + " requireSignal=" + requireSignal
+                            + " hasFuel=" + hasFuel + " state=" + state);
         }
+    }
+
+    @Test
+    void mayRun_truthTableIsExhaustive() {
+        assertEquals(2 * 2 * 2 * FurnaceGui.OutputSlotState.values().length, MAY_RUN_TABLE.length);
     }
 
     // ---- indicatorStateOf ------------------------------------------------------------
@@ -104,18 +151,118 @@ class FurnaceGuiTest {
         assertEquals(FurnaceGui.IndicatorState.NO_SIGNAL, FurnaceGui.indicatorStateOf(false, true, false));
     }
 
+    /**
+     * The complete {@code indicatorStateOf} truth table, written out by hand rather than
+     * restating the implementation's nested conditional. Rows are
+     * {@code {powered, requireSignal, hasFuel, expectedState}}.
+     */
+    private static final Object[][] INDICATOR_TABLE = {
+            {true, true, true, FurnaceGui.IndicatorState.RUNNING},
+            {true, true, false, FurnaceGui.IndicatorState.NO_FUEL},
+            {true, false, true, FurnaceGui.IndicatorState.RUNNING},
+            {true, false, false, FurnaceGui.IndicatorState.NO_FUEL},
+            // Unpowered with a signal required: NO_SIGNAL, and it outranks NO_FUEL.
+            {false, true, true, FurnaceGui.IndicatorState.NO_SIGNAL},
+            {false, true, false, FurnaceGui.IndicatorState.NO_SIGNAL},
+            // Unpowered but no signal required: power is irrelevant, fuel decides.
+            {false, false, true, FurnaceGui.IndicatorState.RUNNING},
+            {false, false, false, FurnaceGui.IndicatorState.NO_FUEL},
+    };
+
     @Test
-    void indicatorState_everyCombination() {
-        for (boolean powered : new boolean[] {true, false}) {
-            for (boolean requireSignal : new boolean[] {true, false}) {
-                for (boolean hasFuel : new boolean[] {true, false}) {
-                    boolean effectivePowered = !requireSignal || powered;
-                    FurnaceGui.IndicatorState expected = !effectivePowered
-                            ? FurnaceGui.IndicatorState.NO_SIGNAL
-                            : !hasFuel ? FurnaceGui.IndicatorState.NO_FUEL : FurnaceGui.IndicatorState.RUNNING;
-                    assertEquals(expected, FurnaceGui.indicatorStateOf(powered, requireSignal, hasFuel),
-                            () -> "powered=" + powered + " requireSignal=" + requireSignal + " hasFuel=" + hasFuel);
-                }
+    void indicatorState_matchesTheHandWrittenTruthTable() {
+        for (Object[] row : INDICATOR_TABLE) {
+            boolean powered = (Boolean) row[0];
+            boolean requireSignal = (Boolean) row[1];
+            boolean hasFuel = (Boolean) row[2];
+            FurnaceGui.IndicatorState expected = (FurnaceGui.IndicatorState) row[3];
+            assertEquals(expected, FurnaceGui.indicatorStateOf(powered, requireSignal, hasFuel),
+                    () -> "powered=" + powered + " requireSignal=" + requireSignal + " hasFuel=" + hasFuel);
+        }
+    }
+
+    @Test
+    void indicatorState_truthTableIsExhaustive() {
+        assertEquals(2 * 2 * 2, INDICATOR_TABLE.length);
+    }
+
+    // ---- C2 regression: closeAll must return items itself, not via the close event ---
+
+    @Test
+    void shutdownSteps_returnItemsBeforeClosing() {
+        // Regression for the shutdown item-destruction bug. During onDisable,
+        // JavaPlugin.setEnabled(false) clears isEnabled BEFORE onDisable() runs, and
+        // SimplePluginManager#fireEvent skips listeners belonging to a disabled plugin --
+        // so InventoryCloseEvent never reaches MachineGuiListener#onClose and every
+        // input/fuel/output item would be destroyed. closeAll must therefore drain the
+        // inventory itself, BEFORE closing it.
+        List<FurnaceGui.ShutdownStep> steps = FurnaceGui.shutdownSteps();
+        assertTrue(steps.contains(FurnaceGui.ShutdownStep.RETURN_ITEMS),
+                "closeAll must return items directly, never relying on event dispatch");
+        assertTrue(steps.indexOf(FurnaceGui.ShutdownStep.RETURN_ITEMS)
+                        < steps.indexOf(FurnaceGui.ShutdownStep.CLOSE_INVENTORY),
+                "items must be returned before the inventory is closed");
+    }
+
+    @Test
+    void shutdownSteps_areExactlyReturnThenClose() {
+        assertEquals(List.of(FurnaceGui.ShutdownStep.RETURN_ITEMS, FurnaceGui.ShutdownStep.CLOSE_INVENTORY),
+                FurnaceGui.shutdownSteps());
+    }
+
+    // ---- I4: shift-click transfer arithmetic ----------------------------------------
+
+    @Test
+    void transferAmount_emptyDestination_takesWholeSourceWhenItFits() {
+        assertEquals(16, FurnaceGui.transferAmount(16, 0, 64));
+    }
+
+    @Test
+    void transferAmount_emptyDestination_isCappedAtMaxStackSize() {
+        assertEquals(64, FurnaceGui.transferAmount(100, 0, 64));
+    }
+
+    @Test
+    void transferAmount_partiallyFilledDestination_movesOnlyTheRoomLeft() {
+        assertEquals(4, FurnaceGui.transferAmount(20, 60, 64));
+    }
+
+    @Test
+    void transferAmount_fullDestination_movesNothing() {
+        assertEquals(0, FurnaceGui.transferAmount(20, 64, 64));
+    }
+
+    @Test
+    void transferAmount_overfullDestination_movesNothingRatherThanNegative() {
+        // Defensive: a slot somehow holding more than its max must never produce a
+        // negative transfer, which would silently ADD items to the source stack.
+        assertEquals(0, FurnaceGui.transferAmount(20, 70, 64));
+    }
+
+    @Test
+    void transferAmount_emptySource_movesNothing() {
+        assertEquals(0, FurnaceGui.transferAmount(0, 0, 64));
+    }
+
+    @Test
+    void transferAmount_singleStackSizeItems_moveOneAtMost() {
+        assertEquals(1, FurnaceGui.transferAmount(5, 0, 1));
+        assertEquals(0, FurnaceGui.transferAmount(5, 1, 1));
+    }
+
+    @Test
+    void transferAmount_neverExceedsSourceOrDestinationRoom() {
+        // Exhaustive over a small grid: the two invariants that make manual shift-click
+        // routing incapable of duplicating or destroying items.
+        for (int source = 0; source <= 70; source++) {
+            for (int dest = 0; dest <= 70; dest++) {
+                int moved = FurnaceGui.transferAmount(source, dest, 64);
+                int finalSource = source;
+                int finalDest = dest;
+                assertTrue(moved >= 0, () -> "negative move for source=" + finalSource + " dest=" + finalDest);
+                assertTrue(moved <= source, () -> "moved more than source held: source=" + finalSource);
+                assertTrue(dest + moved <= Math.max(dest, 64),
+                        () -> "overflowed destination: dest=" + finalDest + " moved=" + moved);
             }
         }
     }

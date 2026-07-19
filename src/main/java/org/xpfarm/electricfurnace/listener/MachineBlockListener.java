@@ -11,13 +11,19 @@ package org.xpfarm.electricfurnace.listener;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Cancellable;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.block.BlockPistonExtendEvent;
+import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
@@ -27,6 +33,8 @@ import org.xpfarm.electricfurnace.item.MachineItemFactory;
 import org.xpfarm.electricfurnace.item.MaterialContract;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -69,6 +77,14 @@ public final class MachineBlockListener implements Listener {
             return;
         }
         if (!event.getPlayer().hasPermission(USE_PERMISSION)) {
+            // Cancel rather than fall through. Letting the place succeed unregistered
+            // consumes the machine item and leaves a plain blast furnace behind -- the
+            // player permanently loses the item to a permission check. Cancelling keeps
+            // the item in their hand.
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(Component.text(
+                            "You don't have permission to place an Electric Furnace.")
+                    .color(NamedTextColor.RED));
             return;
         }
         machines.register(event.getBlockPlaced());
@@ -88,6 +104,81 @@ public final class MachineBlockListener implements Listener {
         machines.unregister(block);
         event.setDropItems(false);
         block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onEntityExplode(EntityExplodeEvent event) {
+        salvageExploded(event.blockList());
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBlockExplode(BlockExplodeEvent event) {
+        salvageExploded(event.blockList());
+    }
+
+    /**
+     * Removes every registered machine from an explosion's block list and salvages it
+     * by hand.
+     *
+     * <p>Left to vanilla, an exploded machine would be destroyed with its registry entry
+     * still pointing at the now-empty location, and would drop -- subject to the
+     * explosion's yield roll -- at best a plain blast furnace. Both are item loss.
+     * Machines are pulled out of the block list so the explosion does not process them,
+     * then broken deliberately: viewers force-closed (returning their contents),
+     * registration removed, and the machine item dropped unconditionally.
+     */
+    private void salvageExploded(List<Block> blockList) {
+        List<Block> machineBlocks = new ArrayList<>();
+        for (Block block : blockList) {
+            if (machines.isMachine(block)) {
+                machineBlocks.add(block);
+            }
+        }
+        if (machineBlocks.isEmpty()) {
+            return;
+        }
+        blockList.removeAll(machineBlocks);
+
+        for (Block block : machineBlocks) {
+            FurnaceGui.closeForBlock(block);
+            machines.unregister(block);
+            block.setType(Material.AIR);
+            block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onPistonExtend(BlockPistonExtendEvent event) {
+        cancelIfMovingMachine(event, event.getBlocks());
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onPistonRetract(BlockPistonRetractEvent event) {
+        cancelIfMovingMachine(event, event.getBlocks());
+    }
+
+    /**
+     * Refuses any piston move that would displace a registered machine.
+     *
+     * <p>A machine's registration is keyed to its block location, so a piston sliding it
+     * one block leaves the entry pointing at an empty space while the moved block
+     * becomes an unregistered plain blast furnace -- the machine item is effectively
+     * lost, and any open GUI is left bound to a block that is no longer there.
+     *
+     * <p>Cancelling is deliberately preferred here over the break-and-drop treatment
+     * explosions get. A piston does not destroy the block, so there is nothing to
+     * salvage: refusing the move keeps the machine intact, registered, and in the
+     * player's build exactly where they put it. Breaking it into a dropped item instead
+     * would turn a redstone contraption brushing against a furnace into silent
+     * disassembly of the player's base.
+     */
+    private void cancelIfMovingMachine(Cancellable event, List<Block> movedBlocks) {
+        for (Block block : movedBlocks) {
+            if (machines.isMachine(block)) {
+                event.setCancelled(true);
+                return;
+            }
+        }
     }
 
     @EventHandler(ignoreCancelled = true)

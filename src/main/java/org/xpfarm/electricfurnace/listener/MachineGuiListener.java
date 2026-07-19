@@ -10,6 +10,7 @@
 package org.xpfarm.electricfurnace.listener;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -18,11 +19,13 @@ import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
 import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
 import org.xpfarm.electricfurnace.gui.GuiLayout;
+import org.xpfarm.electricfurnace.item.MetalClassifier;
 
 import java.util.HashSet;
 import java.util.Objects;
@@ -41,16 +44,18 @@ import java.util.function.Supplier;
  * <em>out</em> of the GUI, number-key hotbar swaps, and double-click collection, all
  * of which route through {@link InventoryClickEvent#getAction()}.
  *
- * <p><b>Shift-click into the GUI is a special case.</b> When a player shift-clicks an
+ * <p><b>Shift-click into the GUI is routed manually.</b> When a player shift-clicks an
  * item in their own inventory, Bukkit's {@code MOVE_TO_OTHER_INVENTORY} handling picks
  * the destination slot in the top inventory internally -- {@link
  * InventoryClickEvent#getSlot()} reports the <em>source</em> slot in the player's own
- * inventory, not where the item lands. That destination-picking algorithm will use the
- * output slot if it is the only empty top slot at the time, which would let an item
- * slip in through a path this class cannot inspect. Rather than reimplement Bukkit's
- * fill order to predict the destination, shift-click-in is uniformly disallowed;
- * players can still drag or plain-click items into the input/fuel slots one at a
- * time.
+ * inventory, not where the item lands -- and that algorithm will use the output slot if
+ * it is the only empty top slot at the time. So Bukkit's move is always cancelled.
+ * Rather than stop there, {@link #handleShiftClickIn} performs the move itself:
+ * redstone to the fuel slot, recyclable items to the input slots, anything else
+ * nowhere. This keeps shift-click working -- filling the inputs is one click instead
+ * of five, which matters on Bedrock, a platform this plugin explicitly supports --
+ * while making the destination something this class chooses explicitly and can
+ * guarantee is never OUTPUT, INDICATOR, or FILLER.
  *
  * <p><b>Drags</b> ({@link InventoryDragEvent}) can span multiple slots, including
  * guarded ones, in a single event -- {@link #shouldCancelDrag} cancels the whole drag
@@ -87,6 +92,13 @@ public final class MachineGuiListener implements Listener {
             return;
         }
 
+        // View-wide actions must be judged before the clicked-inventory split, because
+        // they do not act on the clicked slot alone. See shouldCancelViewWide.
+        if (shouldCancelViewWide(event.getAction())) {
+            event.setCancelled(true);
+            return;
+        }
+
         Inventory clicked = event.getClickedInventory();
         if (clicked == null) {
             // Clicked outside any inventory (e.g. dropping the cursor item into the
@@ -95,19 +107,69 @@ public final class MachineGuiListener implements Listener {
         }
 
         boolean clickedTop = clicked.equals(top);
-        boolean cancel = clickedTop
-                ? shouldCancel(GuiLayout.roleOf(event.getSlot()), event.getAction())
-                : event.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY;
 
-        if (cancel) {
+        if (!clickedTop) {
+            if (event.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) {
+                handleShiftClickIn(event, top);
+            }
+            // Any other click confined to the player's own inventory never changes
+            // this GUI's contents.
+            return;
+        }
+
+        if (shouldCancel(GuiLayout.roleOf(event.getSlot()), event.getAction())) {
             event.setCancelled(true);
             return;
         }
 
-        // A plain click confined to the player's own inventory never changes this
-        // GUI's contents -- only schedule a processing attempt when the GUI itself
-        // was the clicked inventory.
-        if (clickedTop && event.getWhoClicked() instanceof Player player) {
+        if (event.getWhoClicked() instanceof Player player) {
+            scheduleProcess(player, top);
+        }
+    }
+
+    /**
+     * Handles a shift-click from the player's own inventory into the GUI by cancelling
+     * Bukkit's move and performing the routing ourselves.
+     *
+     * <p>Bukkit's own {@code MOVE_TO_OTHER_INVENTORY} picks the destination slot
+     * internally and would happily use the output slot, so it can never be allowed to
+     * run. Blanket-cancelling it is safe but costs a Bedrock player 5+ individual
+     * clicks to fill the inputs, on a platform this plugin explicitly supports. Routing
+     * manually gives both: the destination is chosen by {@link #shiftTargetOf} (a pure,
+     * exhaustively-tested decision) and can only ever be the fuel slot or the input
+     * slots -- {@link FurnaceGui#insertIntoFuel} and
+     * {@link FurnaceGui#insertIntoInputs} address those slots by name and have no code
+     * path that can reach OUTPUT, INDICATOR, or FILLER.
+     *
+     * <p>The moving stack is cloned before any insertion, so the slot's real item is
+     * never aliased into the GUI; it is written back exactly once, with the remainder.
+     */
+    private void handleShiftClickIn(InventoryClickEvent event, Inventory top) {
+        event.setCancelled(true);
+
+        ItemStack current = event.getCurrentItem();
+        if (current == null || current.getType() == Material.AIR) {
+            return;
+        }
+
+        ItemStack moving = current.clone();
+        ShiftTarget target = shiftTargetOf(
+                moving.getType() == Material.REDSTONE,
+                MetalClassifier.classify(moving, configSupplier.get().recycling()).isPresent());
+
+        int moved = switch (target) {
+            case FUEL -> FurnaceGui.insertIntoFuel(top, moving);
+            case INPUT -> FurnaceGui.insertIntoInputs(top, moving);
+            case NONE -> 0;
+        };
+
+        if (moved <= 0) {
+            return;
+        }
+
+        event.setCurrentItem(moving.getAmount() <= 0 ? null : moving);
+
+        if (event.getWhoClicked() instanceof Player player) {
             scheduleProcess(player, top);
         }
     }
@@ -136,7 +198,9 @@ public final class MachineGuiListener implements Listener {
         }
     }
 
-    @EventHandler(ignoreCancelled = true)
+    // No ignoreCancelled: InventoryCloseEvent is not Cancellable, so the flag would be
+    // meaningless here.
+    @EventHandler
     public void onClose(InventoryCloseEvent event) {
         Inventory top = event.getView().getTopInventory();
         if (!FurnaceGui.isFurnaceGui(top)) {
@@ -154,7 +218,17 @@ public final class MachineGuiListener implements Listener {
      */
     private void scheduleProcess(Player player, Inventory top) {
         FurnaceGui.blockOf(top).ifPresent(block -> Bukkit.getScheduler().runTask(plugin, () -> {
-            if (!player.isOnline() || !FurnaceGui.isFurnaceGui(player.getOpenInventory().getTopInventory())) {
+            // Guard on THIS machine's GUI still being open, not merely "some furnace
+            // GUI". Between the click and this tick the player may have closed this GUI
+            // and opened a different machine's; processing `top` then would run against
+            // an inventory they are no longer viewing, using the wrong block's power.
+            if (!player.isOnline()) {
+                return;
+            }
+            boolean sameGuiStillOpen = FurnaceGui.blockOf(player.getOpenInventory().getTopInventory())
+                    .filter(block::equals)
+                    .isPresent();
+            if (!sameGuiStillOpen) {
                 return;
             }
             boolean powered = block.getBlockPower() > 0;
@@ -215,6 +289,54 @@ public final class MachineGuiListener implements Listener {
     static boolean shouldCancel(GuiLayout.SlotRole role, InventoryAction action) {
         ClickEffect effect = classify(action);
         return shouldCancel(role, effect.isPlace(), effect.isTake());
+    }
+
+    /**
+     * Whether an action must be cancelled purely because the top inventory is a furnace
+     * GUI -- irrespective of which inventory was clicked or which slot.
+     *
+     * <p>{@code COLLECT_TO_CURSOR} (double-click collect) is the whole reason this
+     * exists. It is not a single-slot action: it vacuums every matching stack in the
+     * <em>entire view</em>, including top-inventory slots the player never clicked. The
+     * per-slot guard cannot see it, because the clicked slot may legitimately be one of
+     * the player's own. Classified take-only, it therefore passed the FILLER/INDICATOR
+     * guard entirely, and this was directly exploitable: hold a gray stained glass pane,
+     * open the GUI, double-click it in your own inventory, and collect up to 20 filler
+     * panes -- which {@code FurnaceGui.open} then regenerates on the next open, minting
+     * panes indefinitely. The same trick against the fuel slot vacuumed the status
+     * indicator, which {@code refreshIndicator} re-mints, yielding unlimited
+     * redstone/lever/redstone torch. Cancelled unconditionally; a double-click collect
+     * inside a furnace GUI view does nothing at all.
+     */
+    static boolean shouldCancelViewWide(InventoryAction action) {
+        return action == InventoryAction.COLLECT_TO_CURSOR;
+    }
+
+    /** Where a shift-clicked stack from the player's inventory should be routed. */
+    enum ShiftTarget {
+        /** Into the redstone fuel slot. */
+        FUEL,
+        /** Into the recycler input slots. */
+        INPUT,
+        /** Nowhere -- the item belongs in neither; the shift-click is a no-op. */
+        NONE
+    }
+
+    /**
+     * The pure shift-click routing decision. Redstone is fuel first and foremost: it is
+     * never a recycler input, so the fuel slot always wins when both facts hold, and a
+     * player shift-clicking redstone always gets the behavior they meant. Anything
+     * neither burnable nor recyclable routes nowhere rather than being forced into a
+     * slot it does not belong in.
+     */
+    static ShiftTarget shiftTargetOf(boolean isRedstone, boolean isRecyclable) {
+        if (isRedstone) {
+            return ShiftTarget.FUEL;
+        }
+        if (isRecyclable) {
+            return ShiftTarget.INPUT;
+        }
+        return ShiftTarget.NONE;
     }
 
     /**

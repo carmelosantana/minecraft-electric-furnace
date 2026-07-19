@@ -36,6 +36,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.logging.Logger;
 
 /**
  * Owns the Electric Furnace's 27-slot custom {@link Inventory}: rendering the filler
@@ -60,6 +61,8 @@ import java.util.Set;
  * {@code MetalClassifier.resolveBranch}.
  */
 public final class FurnaceGui {
+
+    private static final Logger LOGGER = Logger.getLogger("ElectricFurnace");
 
     private FurnaceGui() {
     }
@@ -216,6 +219,11 @@ public final class FurnaceGui {
 
         boolean hasFuel = hasSufficientFuel(inventory, config.machine().fuelPerOperation());
         ItemStack candidateOutput = candidateItemFor(result, alloys);
+        if (candidateOutput == null) {
+            // Unknown alloy id (already logged) -- treat exactly like a rejected run:
+            // nothing consumed, nothing produced.
+            return false;
+        }
         ItemStack currentOutput = inventory.getItem(GuiLayout.OUTPUT_SLOT);
         OutputSlotState outputState = classifyOutputSlot(currentOutput, candidateOutput);
 
@@ -292,6 +300,15 @@ public final class FurnaceGui {
      */
     static OutputSlotState classifyOutputSlot(ItemStack current, ItemStack candidate) {
         if (current == null || current.getType() == Material.AIR) {
+            if (candidate == null) {
+                return OutputSlotState.DIFFERENT_ITEM;
+            }
+            // An empty slot is only usable if the candidate itself fits in one stack.
+            // Without this, depositOutput would setItem an oversized stack into the
+            // slot -- the same silent corruption the SAME_ITEM branch already blocks.
+            if (candidate.getAmount() > candidate.getMaxStackSize()) {
+                return OutputSlotState.DIFFERENT_ITEM;
+            }
             return OutputSlotState.EMPTY;
         }
         if (candidate == null || !current.isSimilar(candidate)) {
@@ -318,15 +335,30 @@ public final class FurnaceGui {
         if (result instanceof RecycleResult.Remelt remelt) {
             return alloyStack(remelt.alloyId(), remelt.amount(), alloys);
         }
-        // Rejected: never reached, callers return early on Rejected before calling this.
-        throw new IllegalStateException("candidateItemFor called with a Rejected result");
+        // Rejected: callers return early on Rejected before calling this. Return null
+        // rather than throwing -- see alloyStack for why nothing here may throw.
+        return null;
     }
 
+    /**
+     * Builds the item for a resolved alloy id, or {@code null} if the registry does not
+     * know that id.
+     *
+     * <p><b>Never throws.</b> This runs inside a scheduled task fired off a GUI click;
+     * an exception here is swallowed by the scheduler and aborts the operation partway
+     * through, which is exactly how items get destroyed. A config referencing an alloy
+     * id with no definition is a configuration error, not a reason to fail mid-run: we
+     * log it once, naming the id, and the caller treats the run as rejected -- no fuel
+     * consumed, no inputs consumed, no output written.
+     */
     private static ItemStack alloyStack(String alloyId, int amount, AlloyRegistry alloys) {
-        AlloyDefinition definition = alloys.get(alloyId)
-                .orElseThrow(() -> new IllegalStateException(
-                        "RecycleResolver referenced unknown alloy id '" + alloyId + "'"));
-        ItemStack stack = AlloyItemFactory.create(definition);
+        Optional<AlloyDefinition> definition = alloys.get(alloyId);
+        if (definition.isEmpty()) {
+            LOGGER.warning("ElectricFurnace: recycler resolved to unknown alloy id '" + alloyId
+                    + "'; rejecting this operation. Check the 'alloys' section of config.yml.");
+            return null;
+        }
+        ItemStack stack = AlloyItemFactory.create(definition.get());
         stack.setAmount(amount);
         return stack;
     }
@@ -338,6 +370,104 @@ public final class FurnaceGui {
             case COPPER -> Material.COPPER_INGOT;
             case NETHERITE -> Material.NETHERITE_INGOT;
         };
+    }
+
+    // ---- Shift-click routing (see MachineGuiListener's shift-click note) ------------
+
+    /**
+     * How many items may move from a source stack into one destination slot.
+     *
+     * <p>Pure integer math, exhaustively unit tested: this is the arithmetic that keeps
+     * manual shift-click routing from either duplicating items (moving more than the
+     * source holds) or overflowing a slot (moving past {@code maxStackSize}).
+     *
+     * @param sourceAmount how many items the moving stack holds
+     * @param destAmount   how many items the destination slot already holds ({@code 0}
+     *                     for an empty slot)
+     * @param maxStackSize the destination's maximum stack size
+     * @return the number of items to move; never negative, never more than
+     *         {@code sourceAmount}, and never enough to push the destination past
+     *         {@code maxStackSize}
+     */
+    public static int transferAmount(int sourceAmount, int destAmount, int maxStackSize) {
+        int room = maxStackSize - destAmount;
+        if (room <= 0 || sourceAmount <= 0) {
+            return 0;
+        }
+        return Math.min(sourceAmount, room);
+    }
+
+    /**
+     * Moves as much of {@code source} as will fit into the fuel slot, mutating
+     * {@code source}'s amount by however much moved.
+     *
+     * @return the number of items actually moved
+     */
+    public static int insertIntoFuel(Inventory inventory, ItemStack source) {
+        Objects.requireNonNull(inventory, "inventory");
+        Objects.requireNonNull(source, "source");
+        return insertIntoSlot(inventory, GuiLayout.FUEL_SLOT, source);
+    }
+
+    /**
+     * Moves as much of {@code source} as will fit into the input slots, merging into
+     * matching stacks first and then filling empty slots, mutating {@code source}'s
+     * amount by however much moved.
+     *
+     * @return the number of items actually moved
+     */
+    public static int insertIntoInputs(Inventory inventory, ItemStack source) {
+        Objects.requireNonNull(inventory, "inventory");
+        Objects.requireNonNull(source, "source");
+
+        List<Integer> slots = new ArrayList<>(GuiLayout.INPUT_SLOTS);
+        slots.sort(Integer::compareTo);
+
+        int moved = 0;
+        // Two passes, vanilla-style: top up matching stacks before claiming empty slots.
+        for (int slot : slots) {
+            ItemStack existing = inventory.getItem(slot);
+            if (existing != null && existing.getType() != Material.AIR) {
+                moved += insertIntoSlot(inventory, slot, source);
+            }
+        }
+        for (int slot : slots) {
+            ItemStack existing = inventory.getItem(slot);
+            if (existing == null || existing.getType() == Material.AIR) {
+                moved += insertIntoSlot(inventory, slot, source);
+            }
+        }
+        return moved;
+    }
+
+    private static int insertIntoSlot(Inventory inventory, int slot, ItemStack source) {
+        if (source.getAmount() <= 0) {
+            return 0;
+        }
+        ItemStack existing = inventory.getItem(slot);
+
+        if (existing == null || existing.getType() == Material.AIR) {
+            int move = transferAmount(source.getAmount(), 0, source.getMaxStackSize());
+            if (move <= 0) {
+                return 0;
+            }
+            ItemStack placed = source.clone();
+            placed.setAmount(move);
+            inventory.setItem(slot, placed);
+            source.setAmount(source.getAmount() - move);
+            return move;
+        }
+
+        if (!existing.isSimilar(source)) {
+            return 0;
+        }
+        int move = transferAmount(source.getAmount(), existing.getAmount(), existing.getMaxStackSize());
+        if (move <= 0) {
+            return 0;
+        }
+        existing.setAmount(existing.getAmount() + move);
+        source.setAmount(source.getAmount() - move);
+        return move;
     }
 
     // ---- Item-safety: returning contents, and force-closing viewers ----------------
@@ -390,17 +520,59 @@ public final class FurnaceGui {
     }
 
     /**
-     * Force-closes every online player currently viewing any Electric Furnace GUI.
-     * Intended for the plugin's {@code onDisable}, so a server shutdown never leaves
-     * a player's input/fuel/output stranded in a GUI that is about to vanish.
+     * Force-closes every online player currently viewing any Electric Furnace GUI,
+     * returning their items first. Intended for the plugin's {@code onDisable}.
+     *
+     * <p><b>Why this returns items itself instead of relying on the close handler.</b>
+     * Unlike {@link #closeForBlock}, this method runs during shutdown, when event
+     * dispatch to this plugin is already dead: {@code JavaPlugin.setEnabled(false)}
+     * clears {@code isEnabled} <em>before</em> invoking {@code onDisable()}, and
+     * {@code SimplePluginManager#fireEvent} skips every {@code RegisteredListener}
+     * whose plugin is disabled. So {@code MachineGuiListener#onClose} would never run
+     * here, and every input, fuel, and output item would be silently destroyed as the
+     * inventories closed. {@link #returnAllItems} is called directly, before the close.
+     *
+     * <p>Calling it here is safe even if the close handler <em>does</em> also fire (for
+     * any caller that invokes this while the plugin is still enabled):
+     * {@link #returnAllItems} nulls each slot as it drains it, so a second pass finds
+     * the inventory empty and returns nothing. It is idempotent, never duplicating.
      */
     public static void closeAll() {
         for (Player player : Bukkit.getOnlinePlayers()) {
             Inventory top = player.getOpenInventory().getTopInventory();
-            if (top.getHolder() instanceof Holder) {
-                player.closeInventory();
+            if (!(top.getHolder() instanceof Holder)) {
+                continue;
+            }
+            for (ShutdownStep step : shutdownSteps()) {
+                switch (step) {
+                    case RETURN_ITEMS -> returnAllItems(top, player);
+                    case CLOSE_INVENTORY -> player.closeInventory();
+                }
             }
         }
+    }
+
+    /** One step of the per-viewer shutdown sequence performed by {@link #closeAll}. */
+    public enum ShutdownStep {
+        /** Drain input/fuel/output back to the viewing player. */
+        RETURN_ITEMS,
+        /** Close the now-empty inventory. */
+        CLOSE_INVENTORY
+    }
+
+    /**
+     * The ordered steps {@link #closeAll} performs for each viewer.
+     *
+     * <p>Extracted as data, and driven directly by {@link #closeAll}, so the one
+     * property that actually prevents item loss on shutdown is pinned by a unit test
+     * with no server: {@link ShutdownStep#RETURN_ITEMS} must be present and must come
+     * before {@link ShutdownStep#CLOSE_INVENTORY}. Dropping the return step, or
+     * reordering it after the close (which would put us back to relying on an
+     * {@code InventoryCloseEvent} that never fires during {@code onDisable}), fails
+     * {@code FurnaceGuiTest}.
+     */
+    public static List<ShutdownStep> shutdownSteps() {
+        return List.of(ShutdownStep.RETURN_ITEMS, ShutdownStep.CLOSE_INVENTORY);
     }
 
     private static ItemStack indicatorItem(IndicatorState state) {
