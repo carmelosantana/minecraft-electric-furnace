@@ -174,25 +174,126 @@ unchanged; the contradiction is not propagated.
 
 ## 4. Compatibility
 
-- [ ] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '1.21'`.
-- [ ] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared.
-- [ ] Geyser/Floodgate/ViaVersion review covers Bedrock-safe input, UI, inventory, identity, and protocol behavior.
+- [x] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '1.21'`.
+  - `mvn clean verify` BUILD SUCCESS. Embedded `plugin.yml` confirmed `api-version: '1.21'`.
+- [x] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared.
+  - **None.** No `depend`, `softdepend`, or `loadbefore`/`loadafter` entries, deliberately.
+    CopperKingdom interop is read-only via `NamespacedKey`'s String constructor, which
+    needs no plugin instance — so there is no load-order requirement in either
+    direction and neither plugin depends on the other's JAR.
+- [x] Geyser/Floodgate/ViaVersion review covers Bedrock-safe input, UI, inventory, identity, and protocol behavior.
+  - **Input:** all interaction is inventory clicks or commands. No typed chat input
+    anywhere — Bedrock clients cannot reliably use Java chat prompts.
+  - **UI:** custom inventory title only. No `setCustomModelData`, no `item_model`
+    component, no display entities. Verified by scanning `src/main` — the only
+    occurrences of those names are comments explaining why they are not used.
+  - **Inventory:** plugin-owned inventory with slot guards covering plain click,
+    shift-click, hotbar swap, double-click collect, and drag.
+  - **Identity:** items identified by PersistentDataContainer only, never by display
+    name or lore substring. This deliberately avoids the failure mode in the sibling
+    CopperKingdom plugin, which matches the lore substring "Blessed".
+  - **Particles:** only `ELECTRIC_SPARK` and `CAMPFIRE_COSY_SMOKE`, both confirmed
+    mapped in GeyserMC/mappings. Colored `DUST` deliberately unused.
+  - **Protocol:** no assumptions about the client's protocol version, so ViaVersion
+    bridging is unaffected. Runtime-verified alongside ViaVersion 5.11.0.
 
 ## 5. External services
 
-- [ ] External integrations are disabled by default or require explicit configuration and have bounded timeouts.
-- [ ] Ollama/Umami-style external endpoints are optional and failure-tolerant when applicable.
-- [ ] Endpoint failure cannot fail server/plugin startup, and diagnostics redact secrets.
+- [x] External integrations are disabled by default or require explicit configuration and have bounded timeouts.
+  - **Not applicable — there are none.** No network calls of any kind; no HTTP client
+    on the classpath. Verified: the shaded JAR contains only plugin classes,
+    `plugin.yml`, `config.yml`, and Maven metadata.
+- [x] Ollama/Umami-style external endpoints are optional and failure-tolerant when applicable.
+  - Not applicable; none exist.
+- [x] Endpoint failure cannot fail server/plugin startup, and diagnostics redact secrets.
+  - No endpoints. The equivalent startup-safety property was still enforced and
+    reviewed: every `onEnable` step is wrapped in a `Throwable` guard, a malformed
+    config degrades to defaults with warnings, a single malformed alloy entry is
+    skipped rather than discarding the whole config, and sound resolution catches
+    `Throwable` (not merely `ReflectiveOperationException`) so an `Error` from a
+    static initializer cannot escape. No secrets exist to leak.
 
 ## 6. Tests and build
 
-- [ ] Unit tests cover separable logic, configuration, serialization, permissions, and failure paths where applicable.
-- [ ] `mvn --batch-mode --no-transfer-progress clean verify` succeeds.
-- [ ] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded.
+- [x] Unit tests cover separable logic, configuration, serialization, permissions, and failure paths where applicable.
+  - **238 tests, 0 failures.** Coverage spans config validation and clamping, the pure
+    recycle resolver (all eight rules with precedence), alloy registry and
+    balance-ceiling clamping, metal classification, chunk-key encode/decode including
+    hostile input, GUI slot roles and guard decisions, command argument parsing and
+    per-subcommand permissions, and the effects gate.
+  - Bukkit types (`ItemStack`, `Inventory`, `Block`, `Player`) cannot be constructed
+    headlessly, so decisions were extracted into pure functions and tested there —
+    e.g. `MetalClassifier.resolveBranch` over all 16 boolean combinations,
+    `FurnaceGui.shutdownSteps()` as ordered data, `allowedSubcommandTokens` over all
+    permission subsets. Fix agents verified new tests fail against deliberately broken
+    implementations before restoring them.
+- [x] `mvn --batch-mode --no-transfer-progress clean verify` succeeds.
+  - BUILD SUCCESS, 238 tests, 0 failures/errors/skipped.
+- [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded.
+  - `target/electric-furnace-0.1.0.jar`: embedded `plugin.yml` shows version `0.1.0`,
+    main `org.xpfarm.electricfurnace.ElectricFurnacePlugin`, `api-version '1.21'`, the
+    `electricfurnace` command, and all four permission nodes. No server API bundled
+    (`org/bukkit`, `io/papermc`, `net/kyori` all absent — paper-api correctly
+    `provided`). `original-electric-furnace-0.1.0.jar` exists in `target/` and is
+    excluded from release assets by the workflow's `! -name 'original-*'` filter.
 
 ## 7. Matrix
 
+### 7a — Single-plugin runtime verification (this plugin only) — PASSED
+
+Disposable Legendary stack, fresh volume, ports leased via `xpfarm-slot` (slot 0),
+torn down and lease released after each run. Verified twice: once on `ca5d378`, and
+again on `96861af` after the Task 6 review fixes touched the registry and startup
+paths.
+
+Evidence from the second run:
+
+- **Paper, Geyser, Floodgate, and ViaVersion started together.** Plugin list:
+  `ElectricFurnace (0.1.0), Geyser-Spigot (2.11.0-SNAPSHOT), ViaVersion (5.11.0),
+  floodgate (2.2.5-SNAPSHOT)`. `Geyser-Spigot Done (3.032s)`, server
+  `Done (21.265s)`.
+- **Plugin loaded and enabled cleanly:** `Enabling ElectricFurnace v0.1.0` →
+  `ElectricFurnace enabled (5 alloys, effects on).`
+- **Config and alloy parsing confirmed against the real shipped `config.yml`.** The
+  "5 alloys" count exercises `EfConfig.load`'s dotted-path reads and
+  `AlloyRegistry.load`'s `ConfigurationSection` glue — both flagged during review as
+  untestable headlessly. This run is their first real evidence, and they work.
+- **Clean shutdown:** `Disabling ElectricFurnace v0.1.0`, no exceptions.
+- **No exceptions, SEVERE lines, or leaked secrets** in startup, enable, or shutdown
+  logs. The only warning present is vanilla's unrelated `Failed to parse level-type
+  default`.
+- **External-service negative paths:** not applicable — this plugin makes no
+  outbound calls.
+
+**Not covered, and deliberately recorded rather than claimed:**
+
+- **No Java or Bedrock client join was performed**, so no in-game exercise of the
+  GUI, crafting, redstone gating, recycling, particles, or sound. The container
+  exposes no RCON (`enable-rcon=false`) and stdin console injection did not take, so
+  even console commands could not be driven. Everything below therefore rests on
+  unit tests and code review, not observed behavior:
+  - `/electricfurnace give|alloy|reload|info` have never been executed.
+  - The GUI has never been opened; slot guards, the C1 double-click dupe fix, and the
+    C2 shutdown item-return path are unverified at runtime.
+  - Redstone gating and the `COPPER_BULB` status light are unverified. Review noted
+    `BlockRedstoneEvent` should reach adjacent machines after the S1 fix, but this
+    was never observed firing.
+  - Particle appearance and `BLOCK_BEACON_AMBIENT` sound on a Bedrock client are
+    unverified — the sound mapping was already an open question from gate 1 research.
+  - `World#getNearbyPlayers`, the `playSound(Location, String, ...)` overload, and
+    `Bukkit.removeRecipe` resolve at class-load but were never invoked.
+
+  These are the highest-value checks for a human to run before this reaches
+  production. A clean enable is not evidence the plugin works.
+
+### 7b — Ten-plugin ecosystem matrix
+
 - [ ] Fresh-volume [Legendary Java Minecraft Geyser Floodgate stack](https://github.com/TheRemote/Legendary-Java-Minecraft-Geyser-Floodgate) test covers all ten updater-managed plugins.
+  - **Out of band, and not a prerequisite for this plugin's release.** Belongs to
+    `minecraft-plugin-matrix`, triggered by an updater manifest change, a
+    Paper/Geyser/Floodgate/ViaVersion bump, or explicit request — not by every `dev`
+    run. Gate 7a above tested this plugin alone in an otherwise-default stack and is
+    not evidence about interaction with the other nine.
 - [ ] Each updater-managed plugin's manifest `enabled` value, default state, and expected fresh-volume behavior are recorded separately.
 - [ ] Paper, Geyser, Floodgate, and ViaVersion start successfully together.
 - [ ] Java and Bedrock smoke tests cover joins plus affected commands, events, permissions, persistence, and reloads where feasible.

@@ -268,7 +268,24 @@ Extraction is a v2 concern and will require fixing the above first.
 | `recycling.yield-remelt-alloy` | int | `1` | |
 | `recycling.accept-damaged` | bool | `true` | full yield regardless of durability |
 | `alloys.<id>.*` | section | see table | name, lore, color, inputs, stat block |
-| `alloys.balance-ceiling.enabled` | bool | `true` | clamp + warn above netherite |
+
+**Correction (implementation, 2026-07-19):** an earlier draft of this table listed
+`alloys.balance-ceiling.enabled` as a toggle. It was **not implemented, deliberately.**
+The ceiling is enforced unconditionally in `AlloyRegistry` — a ceiling an operator can
+switch off is not a ceiling, and the binding constraint was that it be enforced in
+code rather than documented. A stat above the netherite reference is clamped to the
+diamond reference and logs a warning naming the alloy, the stat, the configured
+value, and the clamp.
+
+Two further implementation notes that diverge from this document's original text:
+
+- **Rule 3 counts all input items, not only non-modifiers.** As originally worded,
+  "fewer than `recycling.slots` non-modifier items → REJECTED" would have rejected
+  this document's own mandated example (4 iron + 1 coal → Steel) before it could
+  reach the named-recipe check. Counting all items is the only reading consistent
+  with the specified behavior.
+- **Yields shipped as 3 / 2 / 1** (same-metal / mixed-alloy / remelt), per the
+  requirements interview.
 
 Every numeric key is range-validated on load. Invalid values log a warning and fall
 back to the default rather than disabling the plugin.
