@@ -17,8 +17,10 @@ import org.bukkit.persistence.PersistentDataType;
 import org.xpfarm.electricfurnace.item.MaterialContract;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 /**
@@ -36,10 +38,26 @@ import java.util.function.Consumer;
  * unit tested without a server. A malformed persisted entry is skipped with a
  * warning by {@link MachineKey#decode}; it is never allowed to propagate as an
  * exception into a Bukkit chunk-load path.
+ *
+ * <h2>Change notification -- the single choke point for cache consumers</h2>
+ *
+ * <p>{@link #register} and {@link #unregister} are the only two places a machine's
+ * registration ever actually changes, no matter which of this plugin's several
+ * listeners triggered the call -- placing, breaking, an explosion salvage, or any
+ * future removal path. Anything that needs to stay in sync with the registered set
+ * (such as {@code MachineEffects}'s per-chunk cache) subscribes once via
+ * {@link #addChangeListener} instead of adding its own parallel set of
+ * {@code BlockPlaceEvent}/{@code BlockBreakEvent}/explosion/piston handlers. Two
+ * independently maintained listener sets drifting apart -- one noticing a removal
+ * path the other does not -- is exactly the class of bug this indirection exists to
+ * prevent; see {@code MachineBlockListener}'s explosion and piston handling, all of
+ * which reach {@code MachineEffects} through this one path rather than through
+ * duplicated event subscriptions.
  */
 public final class MachineRegistry {
 
     private final Consumer<String> warn;
+    private final List<ChangeListener> changeListeners = new CopyOnWriteArrayList<>();
 
     /**
      * @param warn sink for warnings about malformed persisted data; must not be
@@ -47,6 +65,25 @@ public final class MachineRegistry {
      */
     public MachineRegistry(Consumer<String> warn) {
         this.warn = Objects.requireNonNull(warn, "warn");
+    }
+
+    /**
+     * Notified whenever a machine's registration changes -- added or removed -- by
+     * whichever caller triggered {@link #register} or {@link #unregister}.
+     */
+    public interface ChangeListener {
+        /**
+         * {@code block}'s registration just changed. The listener does not need to
+         * know whether this was an add or a remove: the registry is already the
+         * source of truth, so re-reading it (e.g. re-indexing the block's chunk) is
+         * always correct and simpler than tracking the two cases separately.
+         */
+        void onMachineChanged(Block block);
+    }
+
+    /** Subscribes {@code listener} to every future {@link #register}/{@link #unregister}. */
+    public void addChangeListener(ChangeListener listener) {
+        changeListeners.add(Objects.requireNonNull(listener, "listener"));
     }
 
     /** Whether {@code block}'s location is registered as an Electric Furnace. */
@@ -62,6 +99,7 @@ public final class MachineRegistry {
         Set<MachineKey.Coord> coords = readCoords(chunk);
         if (coords.add(relativeOf(block))) {
             writeCoords(chunk, coords);
+            notifyChanged(block);
         }
     }
 
@@ -72,6 +110,13 @@ public final class MachineRegistry {
         Set<MachineKey.Coord> coords = readCoords(chunk);
         if (coords.remove(relativeOf(block))) {
             writeCoords(chunk, coords);
+            notifyChanged(block);
+        }
+    }
+
+    private void notifyChanged(Block block) {
+        for (ChangeListener listener : changeListeners) {
+            listener.onMachineChanged(block);
         }
     }
 

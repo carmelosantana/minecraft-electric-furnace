@@ -12,7 +12,6 @@ package org.xpfarm.electricfurnace.effect;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
-import org.bukkit.Material;
 import org.bukkit.Particle;
 import org.bukkit.SoundCategory;
 import org.bukkit.World;
@@ -21,8 +20,6 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.block.BlockBreakEvent;
-import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
 import org.bukkit.plugin.Plugin;
@@ -57,10 +54,12 @@ import java.util.function.Supplier;
  *       machines schedules exactly one repeating task, same as a server with one.</li>
  *   <li><b>No world scanning, ever.</b> The set of machines to consider is an
  *       in-memory cache keyed by loaded chunk, maintained incrementally by
- *       {@link ChunkLoadEvent} / {@link ChunkUnloadEvent} and by machine place/break.
- *       A run iterates that cache directly; it never walks blocks, never queries a
- *       chunk it was not told about, and never reads a PDC on the hot path -- chunk
- *       PDC reads happen once per chunk load, not once per run.</li>
+ *       {@link ChunkLoadEvent} / {@link ChunkUnloadEvent} and by
+ *       {@link MachineRegistry.ChangeListener} notifications for every place, break,
+ *       and explosion-salvage that ever adds or removes a machine. A run iterates that
+ *       cache directly; it never walks blocks, never queries a chunk it was not told
+ *       about, and never reads a PDC on the hot path -- chunk PDC reads happen once
+ *       per chunk load or registry change, not once per run.</li>
  *   <li><b>Unloaded chunks cost nothing and are never force-loaded.</b> Entries leave
  *       the cache on chunk unload, so a machine in an unloaded chunk is not merely
  *       skipped, it is not even visited. {@link Block#getChunk()} would load a chunk
@@ -92,8 +91,22 @@ import java.util.function.Supplier;
  * {@code MachineEffectsTest} pins them exhaustively with no running server, following
  * the pattern of {@code FurnaceGui#mayRun} and {@code GuiLayout#roleOf}. What remains
  * in this class is Bukkit glue thin enough to read.
+ *
+ * <h2>Staying in sync with the machine registry</h2>
+ *
+ * <p>This class does not listen for {@code BlockPlaceEvent}, {@code BlockBreakEvent},
+ * explosions, or piston moves itself. Registering a second, independent set of
+ * listeners for the same registry changes {@code MachineBlockListener} already reacts
+ * to is exactly how a cache goes stale: the two listener sets are free to drift apart
+ * the moment a new removal path (an explosion, say) is added to one and not the
+ * other. Instead, this class subscribes once to {@link MachineRegistry} itself via
+ * {@link MachineRegistry.ChangeListener} in its constructor, so every current and
+ * future path that calls {@link MachineRegistry#register} or
+ * {@link MachineRegistry#unregister} -- place, break, entity/block explosion salvage,
+ * or anything added later -- keeps this cache correct automatically, with nothing to
+ * remember to wire up on the effects side.
  */
-public final class MachineEffects implements Listener {
+public final class MachineEffects implements Listener, MachineRegistry.ChangeListener {
 
     /**
      * The only particles this plugin may ever emit. Both are confirmed mapped in
@@ -134,6 +147,9 @@ public final class MachineEffects implements Listener {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.machines = Objects.requireNonNull(machines, "machines");
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
+        // The single choke point for every place/break/explosion-salvage that ever adds
+        // or removes a machine -- see the class-level "Staying in sync" note.
+        this.machines.addChangeListener(this);
     }
 
     // =================================================================================
@@ -191,17 +207,29 @@ public final class MachineEffects implements Listener {
      * <p>Safe to call repeatedly: {@code /electricfurnace reload} calls it after
      * {@link #stop()} to pick up a changed {@code effects.period-ticks} without a
      * server restart. Never throws -- an effects failure must not take the plugin
-     * down with it.
+     * down with it, and on the {@code reload} path {@link #restart()} has already
+     * cancelled the previous task by the time this runs, so a throw here would leave
+     * effects off until the next successful reload or a full server restart.
      */
     public void start() {
-        EfConfig config = configSupplier.get();
-        seedLoadedChunks();
+        try {
+            EfConfig config = configSupplier.get();
+            seedLoadedChunks();
 
-        if (!shouldSchedule(config.effects().enabled(), config.effects().periodTicks())) {
-            return;
+            if (!shouldSchedule(config.effects().enabled(), config.effects().periodTicks())) {
+                return;
+            }
+            int period = config.effects().periodTicks();
+            task = Bukkit.getScheduler().runTaskTimer(plugin, this::run, period, period);
+        } catch (Throwable t) {
+            // seedLoadedChunks() walks every already-loaded chunk's machine registry;
+            // a failure there (or reading the config) must degrade to "effects off"
+            // rather than propagate -- consistent with the "startup/reload never
+            // throws" contract enforced everywhere else in this plugin.
+            task = null;
+            Bukkit.getLogger().warning("ElectricFurnace: effects failed to start (" + t.getClass().getName()
+                    + ": " + t.getMessage() + "). Effects are off until the next successful reload or restart.");
         }
-        int period = config.effects().periodTicks();
-        task = Bukkit.getScheduler().runTaskTimer(plugin, this::run, period, period);
     }
 
     /** Cancels the global task, if running. Idempotent. */
@@ -252,27 +280,18 @@ public final class MachineEffects implements Listener {
     }
 
     /**
-     * Re-indexes only the affected chunk when a machine item is placed. Guarded on the
-     * PDC marker first so an ordinary block place -- by far the common case -- costs a
-     * single {@code ItemStack} check and nothing else.
+     * Re-indexes only the affected chunk whenever {@link MachineRegistry} reports that
+     * a machine's registration changed, by any path -- place, break, entity/block
+     * explosion salvage, or anything added to that registry later. This is the fix for
+     * the cache going stale on removal paths {@code MachineBlockListener} handles but
+     * this class previously did not listen for directly (explosions in particular): by
+     * reacting to the registry's own notification instead of duplicating its callers'
+     * event subscriptions, every current and future removal path stays in sync for
+     * free.
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onPlace(BlockPlaceEvent event) {
-        if (org.xpfarm.electricfurnace.item.MaterialContract.isMachine(event.getItemInHand())) {
-            indexChunk(event.getBlockPlaced().getChunk());
-        }
-    }
-
-    /**
-     * Re-indexes only the affected chunk when a machine is broken. Guarded on the block
-     * type first: only a blast furnace can ever have been a machine, so every other
-     * block break costs one enum comparison.
-     */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onBreak(BlockBreakEvent event) {
-        if (event.getBlock().getType() == Material.BLAST_FURNACE) {
-            indexChunk(event.getBlock().getChunk());
-        }
+    @Override
+    public void onMachineChanged(Block block) {
+        indexChunk(block.getChunk());
     }
 
     /**

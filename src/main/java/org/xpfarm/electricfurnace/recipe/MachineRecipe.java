@@ -94,6 +94,14 @@ public final class MachineRecipe implements Listener {
      * <p>Identification is by {@link MaterialContract} PDC, never by display name or
      * lore substring -- a hard rule of this plugin's item contract, and the only check
      * that cannot be spoofed by a renamed item.
+     *
+     * <p>The permission check is against {@link org.bukkit.inventory.InventoryView#getPlayer()}
+     * -- the crafter -- not {@code event.getViewers()}. A crafting table's viewer list
+     * can be empty (nobody but the crafter is looking at their own personal 2x2, and
+     * even a workbench GUI's viewer list is not guaranteed non-empty at this point in
+     * the event), and {@code Stream.allMatch} on an empty stream is vacuously
+     * {@code true} -- silently permitting the craft for everyone once no one happens to
+     * be in the viewer list, instead of correctly denying it.
      */
     @EventHandler
     public void onPrepareCraft(PrepareItemCraftEvent event) {
@@ -105,8 +113,7 @@ public final class MachineRecipe implements Listener {
         if (!MaterialContract.isMachine(result)) {
             return;
         }
-        boolean permitted = event.getViewers().stream()
-                .allMatch(viewer -> viewer.hasPermission(CRAFT_PERMISSION));
+        boolean permitted = event.getView().getPlayer().hasPermission(CRAFT_PERMISSION);
         if (!permitted) {
             event.getInventory().setResult(null);
         }

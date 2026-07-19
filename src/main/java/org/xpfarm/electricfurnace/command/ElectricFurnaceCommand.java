@@ -26,11 +26,13 @@ import org.xpfarm.electricfurnace.item.AlloyItemFactory;
 import org.xpfarm.electricfurnace.item.MachineItemFactory;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -233,27 +235,54 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
     }
 
     /**
+     * The subcommand tokens a sender holding exactly {@code heldPermissions} is allowed
+     * to run, in {@link Sub} declaration order.
+     *
+     * <p>This is the pure decision behind tab completion's permission filter: a default
+     * player must not see {@code give}, {@code alloy}, or {@code reload} offered as
+     * completions merely because {@link #complete} used to return every subcommand
+     * unconditionally.
+     *
+     * @param heldPermissions the permission nodes the sender currently holds
+     */
+    public static List<String> allowedSubcommandTokens(Set<String> heldPermissions) {
+        Objects.requireNonNull(heldPermissions, "heldPermissions");
+        List<String> tokens = new ArrayList<>();
+        for (Sub sub : Sub.values()) {
+            if (heldPermissions.contains(permissionFor(sub))) {
+                tokens.add(sub.token());
+            }
+        }
+        return List.copyOf(tokens);
+    }
+
+    /**
      * Tab completions for a partially typed argument array.
      *
-     * @param args     the arguments so far; the last element is the partial token
-     * @param alloyIds known alloy ids, for {@code /electricfurnace alloy <tab>}
-     * @return matching completions, never {@code null}
+     * @param args            the arguments so far; the last element is the partial token
+     * @param alloyIds        known alloy ids, for {@code /electricfurnace alloy <tab>}
+     * @param heldPermissions the permission nodes the sender currently holds, used to
+     *                        keep an unauthorized subcommand out of the first argument's
+     *                        completions
+     * @return matching completions; {@code null} to defer to the server's own default
+     *         completion, used for {@code give}'s player-name argument -- Bukkit only
+     *         falls back to its default (online player names) on a literal {@code null},
+     *         not on an empty list
      */
-    public static List<String> complete(String[] args, List<String> alloyIds) {
+    public static List<String> complete(String[] args, List<String> alloyIds, Set<String> heldPermissions) {
         if (args == null || args.length == 0) {
             return List.of();
         }
         if (args.length == 1) {
-            List<String> tokens = new ArrayList<>();
-            for (Sub sub : Sub.values()) {
-                tokens.add(sub.token());
-            }
-            return filterByPrefix(tokens, args[0]);
+            return filterByPrefix(allowedSubcommandTokens(heldPermissions), args[0]);
         }
-        if (args.length == 2 && subOf(args[0]).orElse(null) == Sub.ALLOY) {
+        Sub sub = subOf(args[0]).orElse(null);
+        if (args.length == 2 && sub == Sub.ALLOY) {
             return filterByPrefix(alloyIds == null ? List.of() : alloyIds, args[1]);
         }
-        // `give`'s player argument is left to the server's own player completion, and
+        if (args.length == 2 && sub == Sub.GIVE) {
+            return null;
+        }
         // amounts are free-form; everything else takes no arguments.
         return List.of();
     }
@@ -303,7 +332,19 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
         for (AlloyDefinition definition : alloysSupplier.get().all()) {
             alloyIds.add(definition.id());
         }
-        return complete(args, alloyIds);
+        return complete(args, alloyIds, heldPermissions(sender));
+    }
+
+    /** The subset of the three distinct subcommand permissions {@code sender} holds. */
+    private static Set<String> heldPermissions(CommandSender sender) {
+        Set<String> held = new HashSet<>();
+        for (Sub sub : Sub.values()) {
+            String permission = permissionFor(sub);
+            if (sender.hasPermission(permission)) {
+                held.add(permission);
+            }
+        }
+        return held;
     }
 
     private void handleGive(CommandSender sender, ParseResult parsed) {

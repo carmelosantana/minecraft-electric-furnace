@@ -70,20 +70,30 @@ class MachineEffectsTest {
             assertFalse(MachineEffects.shouldEmit(true, -5, 4, true));
         }
 
+        // A "gateIsExhaustiveOverEveryCombination" test previously lived here, but it
+        // computed its expected value as `enabled && period > 0 && nearby > 0 &&
+        // active` -- the implementation's own expression -- so it could not fail for
+        // any change that preserved that shape; it was deleted rather than kept as a
+        // test that cannot fail. The six concrete-literal cases above (and the two
+        // below) already pin every dimension of the gate with a hand-picked
+        // input/output pair apiece.
+
         @Test
-        void gateIsExhaustiveOverEveryCombination() {
-            for (boolean enabled : new boolean[]{false, true}) {
-                for (int period : new int[]{-1, 0, 1, 15, 40}) {
-                    for (int nearby : new int[]{-1, 0, 1, 50}) {
-                        for (boolean active : new boolean[]{false, true}) {
-                            boolean expected = enabled && period > 0 && nearby > 0 && active;
-                            assertEquals(expected, MachineEffects.shouldEmit(enabled, period, nearby, active),
-                                    "enabled=" + enabled + " period=" + period
-                                            + " nearby=" + nearby + " active=" + active);
-                        }
-                    }
-                }
-            }
+        void allFourGatingDimensionsMustHoldSimultaneously() {
+            // A hand-written truth table row for the one case not otherwise covered
+            // above: every gate open at once is the only combination that must emit.
+            assertTrue(MachineEffects.shouldEmit(true, 15, 3, true));
+        }
+
+        @Test
+        void anySingleGateClosedIsEnoughToSuppressEmission() {
+            // Four concrete rows, one per dimension, each flipping exactly one gate
+            // shut against an otherwise-fully-open baseline (enabled, period 15,
+            // 3 nearby players, active).
+            assertFalse(MachineEffects.shouldEmit(false, 15, 3, true), "enabled=false");
+            assertFalse(MachineEffects.shouldEmit(true, 0, 3, true), "period=0");
+            assertFalse(MachineEffects.shouldEmit(true, 15, 0, true), "nearby=0");
+            assertFalse(MachineEffects.shouldEmit(true, 15, 3, false), "active=false");
         }
     }
 

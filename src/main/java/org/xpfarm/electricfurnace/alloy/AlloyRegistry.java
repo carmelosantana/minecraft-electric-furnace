@@ -110,9 +110,11 @@ public final class AlloyRegistry {
      * (string, optional), {@code inputs} (string list, may be empty to mark the
      * fallback), and {@code stats.*} (the six {@link AlloyStats} fields).
      *
-     * <p>A missing or malformed alloy entry is skipped with a warning rather than
-     * thrown -- consistent with the rest of this plugin's "never fail startup"
-     * config contract.
+     * <p>A missing or malformed alloy entry is skipped with a warning naming the
+     * offending alloy id, rather than thrown out of the whole method -- consistent
+     * with the rest of this plugin's "never fail startup" config contract, and
+     * deliberately per-entry: one bad {@code alloys.*} child must cost that one alloy,
+     * not fall back to every default recipe just because it sat next to a typo.
      *
      * @param alloysSection the {@code alloys} configuration section; may be {@code null}
      * @param warn          sink for warnings, both parsing and balance-ceiling clamp
@@ -127,7 +129,16 @@ public final class AlloyRegistry {
                     warn.accept("ElectricFurnace alloys: entry '" + id + "' is not a section; skipped.");
                     continue;
                 }
-                definitions.add(parseDefinition(id, section));
+                try {
+                    definitions.add(parseDefinition(id, section));
+                } catch (RuntimeException e) {
+                    // A single malformed entry (e.g. a stats value the section
+                    // implementation refuses to coerce) must cost only this alloy, not
+                    // send loadConfiguration() to its catch-all and fall back to every
+                    // default recipe.
+                    warn.accept("ElectricFurnace alloys: entry '" + id + "' is malformed and was skipped ("
+                            + e.getClass().getSimpleName() + ": " + e.getMessage() + ").");
+                }
             }
         }
         return fromDefinitions(definitions, warn);

@@ -9,8 +9,12 @@
  */
 package org.xpfarm.electricfurnace.alloy;
 
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -142,5 +146,70 @@ class AlloyRegistryTest {
 
     private static AlloyDefinition fallback() {
         return new AlloyDefinition("fused_alloy", "Fused Alloy", List.of(), "#4B4B4B", Set.of(), BASELINE_STATS);
+    }
+
+    // ---- M4: one malformed alloy entry must not take down the whole load ------------
+
+    /**
+     * {@code AlloyRegistry#load} is Bukkit-facing glue ({@link AlloyRegistry} field
+     * accessors take {@link ConfigurationSection}), but the defect under test --
+     * {@code parseDefinition} not being individually guarded -- is only observable
+     * through it: a real {@code ConfigurationSection} is forgiving enough (its
+     * {@code get*} accessors return defaults rather than throwing) that no ordinary
+     * malformed YAML reproduces the bug. A dynamic proxy stands in for one entry whose
+     * backing section throws, simulating the class of malformed/incompatible entry the
+     * finding describes without needing a mocking framework.
+     */
+    @Test
+    void malformedEntry_isSkippedWithWarning_othersSurvive() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("alloys.steel.display-name", "Steel");
+        yaml.set("alloys.steel.inputs", List.of("iron", "coal"));
+        yaml.set("alloys.busted.display-name", "Busted");
+        yaml.set("alloys.fused_alloy.display-name", "Fused Alloy");
+
+        ConfigurationSection alloysSection = yaml.getConfigurationSection("alloys");
+        assertTrue(alloysSection != null, "test setup: the alloys section must exist");
+        ConfigurationSection wrapped = sectionThatThrowsForChild(alloysSection, "busted");
+
+        AlloyRegistry registry = AlloyRegistry.load(wrapped, this::warn);
+
+        assertTrue(registry.get("steel").isPresent(), "the well-formed 'steel' entry must survive");
+        assertTrue(registry.get("fused_alloy").isPresent(), "the well-formed fallback entry must survive");
+        assertTrue(registry.get("busted").isEmpty(), "the malformed 'busted' entry must be skipped");
+        assertEquals(1, warnings.size(),
+                "exactly one warning (the malformed entry); the survivors must parse silently: " + warnings);
+        assertTrue(warnings.get(0).contains("busted"), "the warning should name the malformed alloy id");
+    }
+
+    /**
+     * Wraps {@code real} so that {@code getConfigurationSection(throwingChildId)}
+     * returns a further-wrapped child whose {@code getString} always throws --
+     * everything else on both proxies delegates straight through to the real objects.
+     */
+    private static ConfigurationSection sectionThatThrowsForChild(ConfigurationSection real, String throwingChildId) {
+        InvocationHandler handler = (proxyObj, method, methodArgs) -> {
+            if ("getConfigurationSection".equals(method.getName())
+                    && methodArgs != null && methodArgs.length == 1
+                    && throwingChildId.equals(methodArgs[0])) {
+                ConfigurationSection realChild = real.getConfigurationSection(throwingChildId);
+                return throwingSection(realChild);
+            }
+            return method.invoke(real, methodArgs);
+        };
+        return (ConfigurationSection) Proxy.newProxyInstance(
+                ConfigurationSection.class.getClassLoader(), new Class<?>[]{ConfigurationSection.class}, handler);
+    }
+
+    /** A proxy over {@code real} whose {@code getString} always throws, simulating a malformed value. */
+    private static ConfigurationSection throwingSection(ConfigurationSection real) {
+        InvocationHandler handler = (proxyObj, method, methodArgs) -> {
+            if ("getString".equals(method.getName())) {
+                throw new IllegalStateException("simulated malformed entry");
+            }
+            return method.invoke(real, methodArgs);
+        };
+        return (ConfigurationSection) Proxy.newProxyInstance(
+                ConfigurationSection.class.getClassLoader(), new Class<?>[]{ConfigurationSection.class}, handler);
     }
 }
