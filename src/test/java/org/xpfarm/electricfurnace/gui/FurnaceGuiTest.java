@@ -18,155 +18,89 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Pure unit tests for {@link FurnaceGui}'s processing gate ({@link FurnaceGui#mayRun})
- * and status-indicator decision ({@link FurnaceGui#indicatorStateOf}). Both are plain
- * functions over booleans/enums -- no {@code org.bukkit} type, no running server.
- *
- * <p>{@link #mayRun_everyCombination} exhaustively covers all
- * {@code 2 x 2 x 2 x 3 = 24} combinations of (powered, requireSignal, hasFuel,
- * outputSlotState), following the same exhaustive-boolean-combination pattern as
- * {@code MetalClassifierTest}'s coverage of {@code MetalClassifier.resolveBranch}.
+ * Pure unit tests for {@link FurnaceGui}'s status-indicator decision
+ * ({@link FurnaceGui#indicatorStateOf}). It is a plain function over booleans/enums --
+ * no {@code org.bukkit} type, no running server.
  */
 class FurnaceGuiTest {
-
-    // ---- mayRun: the processing gate ------------------------------------------------
-
-    @Test
-    void mayRun_poweredWithFuelAndEmptyOutput_runs() {
-        assertTrue(FurnaceGui.mayRun(true, true, true, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_poweredWithFuelAndMatchingOutput_runs() {
-        assertTrue(FurnaceGui.mayRun(true, true, true, FurnaceGui.OutputSlotState.SAME_ITEM));
-    }
-
-    @Test
-    void mayRun_unpoweredWhenSignalRequired_doesNotRun() {
-        assertFalse(FurnaceGui.mayRun(false, true, true, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_unpoweredWhenSignalNotRequired_stillRuns() {
-        assertTrue(FurnaceGui.mayRun(false, false, true, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_noFuel_doesNotRun() {
-        assertFalse(FurnaceGui.mayRun(true, true, false, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_outputHoldsDifferentItem_doesNotRun_evenWhenPoweredAndFueled() {
-        assertFalse(FurnaceGui.mayRun(true, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM));
-    }
-
-    /**
-     * The complete {@code mayRun} truth table, written out by hand.
-     *
-     * <p>Rows are {@code {powered, requireSignal, hasFuel, outputSlotState, expected}}.
-     * Deliberately NOT derived from the implementation's own boolean expression: an
-     * "expected" value that restates the implementation passes against any
-     * implementation matching that restatement, wrong ones included. All 24 outcomes are
-     * therefore spelled out literally.
-     */
-    private static final Object[][] MAY_RUN_TABLE = {
-            // Powered, signal required -- runs only with fuel and a non-blocking output.
-            {true, true, true, FurnaceGui.OutputSlotState.EMPTY, true},
-            {true, true, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
-            {true, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {true, true, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {true, true, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {true, true, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-
-            // Powered, signal not required -- same as above; power is moot.
-            {true, false, true, FurnaceGui.OutputSlotState.EMPTY, true},
-            {true, false, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
-            {true, false, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {true, false, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {true, false, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {true, false, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-
-            // Unpowered, signal required -- never runs, whatever else is true.
-            {false, true, true, FurnaceGui.OutputSlotState.EMPTY, false},
-            {false, true, true, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {false, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {false, true, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {false, true, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {false, true, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-
-            // Unpowered but signal not required -- runs on fuel + non-blocking output.
-            {false, false, true, FurnaceGui.OutputSlotState.EMPTY, true},
-            {false, false, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
-            {false, false, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {false, false, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {false, false, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {false, false, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-    };
-
-    @Test
-    void mayRun_matchesTheHandWrittenTruthTable() {
-        for (Object[] row : MAY_RUN_TABLE) {
-            boolean powered = (Boolean) row[0];
-            boolean requireSignal = (Boolean) row[1];
-            boolean hasFuel = (Boolean) row[2];
-            FurnaceGui.OutputSlotState state = (FurnaceGui.OutputSlotState) row[3];
-            boolean expected = (Boolean) row[4];
-            assertEquals(expected, FurnaceGui.mayRun(powered, requireSignal, hasFuel, state),
-                    () -> "powered=" + powered + " requireSignal=" + requireSignal
-                            + " hasFuel=" + hasFuel + " state=" + state);
-        }
-    }
-
-    @Test
-    void mayRun_truthTableIsExhaustive() {
-        assertEquals(2 * 2 * 2 * FurnaceGui.OutputSlotState.values().length, MAY_RUN_TABLE.length);
-    }
 
     // ---- indicatorStateOf ------------------------------------------------------------
 
     @Test
     void indicatorState_unpoweredWhenSignalRequired_isNoSignal() {
-        assertEquals(FurnaceGui.IndicatorState.NO_SIGNAL, FurnaceGui.indicatorStateOf(false, true, true));
+        assertEquals(FurnaceGui.IndicatorState.NO_SIGNAL, FurnaceGui.indicatorStateOf(false, true, true, false));
     }
 
     @Test
     void indicatorState_unpoweredButSignalNotRequired_andHasFuel_isRunning() {
-        assertEquals(FurnaceGui.IndicatorState.RUNNING, FurnaceGui.indicatorStateOf(false, false, true));
+        assertEquals(FurnaceGui.IndicatorState.RUNNING, FurnaceGui.indicatorStateOf(false, false, true, false));
     }
 
     @Test
     void indicatorState_poweredButNoFuel_isNoFuel() {
-        assertEquals(FurnaceGui.IndicatorState.NO_FUEL, FurnaceGui.indicatorStateOf(true, true, false));
+        assertEquals(FurnaceGui.IndicatorState.NO_FUEL, FurnaceGui.indicatorStateOf(true, true, false, false));
     }
 
     @Test
     void indicatorState_poweredWithFuel_isRunning() {
-        assertEquals(FurnaceGui.IndicatorState.RUNNING, FurnaceGui.indicatorStateOf(true, true, true));
+        assertEquals(FurnaceGui.IndicatorState.RUNNING, FurnaceGui.indicatorStateOf(true, true, true, false));
     }
 
     @Test
     void indicatorState_noSignalTakesPrecedenceOverNoFuel() {
         // Unpowered AND no fuel: signal is the more fundamental blocker.
-        assertEquals(FurnaceGui.IndicatorState.NO_SIGNAL, FurnaceGui.indicatorStateOf(false, true, false));
+        assertEquals(FurnaceGui.IndicatorState.NO_SIGNAL, FurnaceGui.indicatorStateOf(false, true, false, false));
+    }
+
+    @Test
+    void indicatorState_poweredFueledAndSmelting_isSmelting() {
+        assertEquals(FurnaceGui.IndicatorState.SMELTING, FurnaceGui.indicatorStateOf(true, true, true, true));
+    }
+
+    @Test
+    void indicatorState_noSignalTakesPrecedenceOverSmelting() {
+        assertEquals(FurnaceGui.IndicatorState.NO_SIGNAL, FurnaceGui.indicatorStateOf(false, true, true, true));
+    }
+
+    @Test
+    void indicatorState_noFuelTakesPrecedenceOverSmelting() {
+        // A run in progress but the fuel slot has since been emptied: NO_FUEL still wins,
+        // exactly mirroring the precedence NO_SIGNAL already has over NO_FUEL.
+        assertEquals(FurnaceGui.IndicatorState.NO_FUEL, FurnaceGui.indicatorStateOf(true, true, false, true));
     }
 
     /**
      * The complete {@code indicatorStateOf} truth table, written out by hand rather than
      * restating the implementation's nested conditional. Rows are
-     * {@code {powered, requireSignal, hasFuel, expectedState}}.
+     * {@code {powered, requireSignal, hasFuel, smelting, expectedState}}.
+     *
+     * <p>Precedence under test: {@code NO_SIGNAL > NO_FUEL > SMELTING > RUNNING}.
      */
     private static final Object[][] INDICATOR_TABLE = {
-            {true, true, true, FurnaceGui.IndicatorState.RUNNING},
-            {true, true, false, FurnaceGui.IndicatorState.NO_FUEL},
-            {true, false, true, FurnaceGui.IndicatorState.RUNNING},
-            {true, false, false, FurnaceGui.IndicatorState.NO_FUEL},
-            // Unpowered with a signal required: NO_SIGNAL, and it outranks NO_FUEL.
-            {false, true, true, FurnaceGui.IndicatorState.NO_SIGNAL},
-            {false, true, false, FurnaceGui.IndicatorState.NO_SIGNAL},
-            // Unpowered but no signal required: power is irrelevant, fuel decides.
-            {false, false, true, FurnaceGui.IndicatorState.RUNNING},
-            {false, false, false, FurnaceGui.IndicatorState.NO_FUEL},
+            // Powered, signal required, fueled -- SMELTING or RUNNING depending on progress.
+            {true, true, true, false, FurnaceGui.IndicatorState.RUNNING},
+            {true, true, true, true, FurnaceGui.IndicatorState.SMELTING},
+            // Powered, signal required, no fuel -- NO_FUEL regardless of smelting.
+            {true, true, false, false, FurnaceGui.IndicatorState.NO_FUEL},
+            {true, true, false, true, FurnaceGui.IndicatorState.NO_FUEL},
+
+            // Powered, signal not required -- power is moot, same shape as above.
+            {true, false, true, false, FurnaceGui.IndicatorState.RUNNING},
+            {true, false, true, true, FurnaceGui.IndicatorState.SMELTING},
+            {true, false, false, false, FurnaceGui.IndicatorState.NO_FUEL},
+            {true, false, false, true, FurnaceGui.IndicatorState.NO_FUEL},
+
+            // Unpowered, signal required -- NO_SIGNAL always, the most fundamental blocker.
+            {false, true, true, false, FurnaceGui.IndicatorState.NO_SIGNAL},
+            {false, true, true, true, FurnaceGui.IndicatorState.NO_SIGNAL},
+            {false, true, false, false, FurnaceGui.IndicatorState.NO_SIGNAL},
+            {false, true, false, true, FurnaceGui.IndicatorState.NO_SIGNAL},
+
+            // Unpowered but signal not required -- power is irrelevant, fuel/smelting decide.
+            {false, false, true, false, FurnaceGui.IndicatorState.RUNNING},
+            {false, false, true, true, FurnaceGui.IndicatorState.SMELTING},
+            {false, false, false, false, FurnaceGui.IndicatorState.NO_FUEL},
+            {false, false, false, true, FurnaceGui.IndicatorState.NO_FUEL},
     };
 
     @Test
@@ -175,39 +109,17 @@ class FurnaceGuiTest {
             boolean powered = (Boolean) row[0];
             boolean requireSignal = (Boolean) row[1];
             boolean hasFuel = (Boolean) row[2];
-            FurnaceGui.IndicatorState expected = (FurnaceGui.IndicatorState) row[3];
-            assertEquals(expected, FurnaceGui.indicatorStateOf(powered, requireSignal, hasFuel),
-                    () -> "powered=" + powered + " requireSignal=" + requireSignal + " hasFuel=" + hasFuel);
+            boolean smelting = (Boolean) row[3];
+            FurnaceGui.IndicatorState expected = (FurnaceGui.IndicatorState) row[4];
+            assertEquals(expected, FurnaceGui.indicatorStateOf(powered, requireSignal, hasFuel, smelting),
+                    () -> "powered=" + powered + " requireSignal=" + requireSignal
+                            + " hasFuel=" + hasFuel + " smelting=" + smelting);
         }
     }
 
     @Test
     void indicatorState_truthTableIsExhaustive() {
-        assertEquals(2 * 2 * 2, INDICATOR_TABLE.length);
-    }
-
-    // ---- C2 regression: closeAll must return items itself, not via the close event ---
-
-    @Test
-    void shutdownSteps_returnItemsBeforeClosing() {
-        // Regression for the shutdown item-destruction bug. During onDisable,
-        // JavaPlugin.setEnabled(false) clears isEnabled BEFORE onDisable() runs, and
-        // SimplePluginManager#fireEvent skips listeners belonging to a disabled plugin --
-        // so InventoryCloseEvent never reaches MachineGuiListener#onClose and every
-        // input/fuel/output item would be destroyed. closeAll must therefore drain the
-        // inventory itself, BEFORE closing it.
-        List<FurnaceGui.ShutdownStep> steps = FurnaceGui.shutdownSteps();
-        assertTrue(steps.contains(FurnaceGui.ShutdownStep.RETURN_ITEMS),
-                "closeAll must return items directly, never relying on event dispatch");
-        assertTrue(steps.indexOf(FurnaceGui.ShutdownStep.RETURN_ITEMS)
-                        < steps.indexOf(FurnaceGui.ShutdownStep.CLOSE_INVENTORY),
-                "items must be returned before the inventory is closed");
-    }
-
-    @Test
-    void shutdownSteps_areExactlyReturnThenClose() {
-        assertEquals(List.of(FurnaceGui.ShutdownStep.RETURN_ITEMS, FurnaceGui.ShutdownStep.CLOSE_INVENTORY),
-                FurnaceGui.shutdownSteps());
+        assertEquals(2 * 2 * 2 * 2, INDICATOR_TABLE.length);
     }
 
     // ---- I4: shift-click transfer arithmetic ----------------------------------------
@@ -265,5 +177,55 @@ class FurnaceGuiTest {
                         () -> "overflowed destination: dest=" + finalDest + " moved=" + moved);
             }
         }
+    }
+
+    // ---- Review fix pass 1, finding 4: closeAll's shutdown step ordering -------------
+    //
+    // Restores the property the deleted ShutdownStep/shutdownSteps() pair used to pin:
+    // the item-safety step (persist, or return-to-player) must never come after the
+    // inventory is closed. closeAll now has two branches instead of one unconditional
+    // sequence, so both are asserted here.
+
+    @Test
+    void closeAllSteps_whenPersistSucceeded_isPersistThenClose() {
+        assertEquals(
+                List.of(FurnaceGui.CloseAllStep.PERSIST, FurnaceGui.CloseAllStep.CLOSE),
+                FurnaceGui.closeAllSteps(true));
+    }
+
+    @Test
+    void closeAllSteps_whenPersistFailed_isReturnThenClose() {
+        assertEquals(
+                List.of(FurnaceGui.CloseAllStep.RETURN, FurnaceGui.CloseAllStep.CLOSE),
+                FurnaceGui.closeAllSteps(false));
+    }
+
+    @Test
+    void closeAllSteps_itemSafetyStepAlwaysPrecedesClose_inBothBranches() {
+        for (boolean persistSucceeded : new boolean[] {true, false}) {
+            List<FurnaceGui.CloseAllStep> steps = FurnaceGui.closeAllSteps(persistSucceeded);
+            int closeIndex = steps.indexOf(FurnaceGui.CloseAllStep.CLOSE);
+            assertTrue(closeIndex >= 0, () -> "CLOSE missing for persistSucceeded=" + persistSucceeded);
+            for (int i = 0; i < steps.size(); i++) {
+                FurnaceGui.CloseAllStep step = steps.get(i);
+                boolean isItemSafetyStep =
+                        step == FurnaceGui.CloseAllStep.PERSIST || step == FurnaceGui.CloseAllStep.RETURN;
+                int finalI = i;
+                boolean finalPersistSucceeded = persistSucceeded;
+                if (isItemSafetyStep) {
+                    assertTrue(finalI < closeIndex, () -> "item-safety step " + step
+                            + " did not precede CLOSE for persistSucceeded=" + finalPersistSucceeded);
+                }
+            }
+        }
+    }
+
+    @Test
+    void closeAllSteps_neverProducesReturnAndPersistTogether() {
+        // Exactly one item-safety step per branch -- never both, never neither.
+        assertEquals(2, FurnaceGui.closeAllSteps(true).size());
+        assertEquals(2, FurnaceGui.closeAllSteps(false).size());
+        assertFalse(FurnaceGui.closeAllSteps(true).contains(FurnaceGui.CloseAllStep.RETURN));
+        assertFalse(FurnaceGui.closeAllSteps(false).contains(FurnaceGui.CloseAllStep.PERSIST));
     }
 }

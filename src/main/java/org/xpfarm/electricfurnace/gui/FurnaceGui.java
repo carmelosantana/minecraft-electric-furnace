@@ -19,17 +19,13 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.xpfarm.electricfurnace.alloy.AlloyDefinition;
-import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
-import org.xpfarm.electricfurnace.alloy.MetalType;
 import org.xpfarm.electricfurnace.config.EfConfig;
-import org.xpfarm.electricfurnace.item.AlloyItemFactory;
-import org.xpfarm.electricfurnace.item.MetalClassifier;
-import org.xpfarm.electricfurnace.recycle.RecycleInput;
-import org.xpfarm.electricfurnace.recycle.RecycleResolver;
-import org.xpfarm.electricfurnace.recycle.RecycleResult;
+import org.xpfarm.electricfurnace.machine.MachineRules;
+import org.xpfarm.electricfurnace.machine.MachineState;
+import org.xpfarm.electricfurnace.machine.MachineStore;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -40,25 +36,31 @@ import java.util.logging.Logger;
 
 /**
  * Owns the Electric Furnace's 27-slot custom {@link Inventory}: rendering the filler
- * panes and status indicator, running the recycler resolution, and returning items to
- * players -- never destroying them.
+ * panes and status indicator, and moving items safely in and out -- never destroying
+ * them.
  *
- * <p><b>No cross-session persistence, by design.</b> Every {@link #open} call creates
- * a brand-new, empty backing {@code Inventory}; nothing is ever written to a chunk or
- * block PDC for slot contents (Task 4's {@code MachineRegistry} persists only machine
- * <em>locations</em>, never item state). This is exactly what makes the highest-stakes
- * requirement tractable: {@link #returnAllItems} unconditionally drains input, fuel,
- * <b>and</b> output back to the viewing player on every close, so nothing is ever left
- * sitting in a plain in-memory {@code Map} that would silently evaporate on server
- * restart. The plan only requires returning input and fuel on close; this class
- * deliberately also returns any unclaimed output, since leaving it behind would be an
- * item-loss bug the moment the server restarts before that player reopens the GUI.
+ * <p><b>The GUI does not own the items; it does not even hold them.</b> A machine's
+ * {@link MachineState} <em>is</em> the inventory's {@link InventoryHolder}, and the
+ * inventory it owns is this machine's only item storage. {@link #open} hands that exact
+ * instance to the player, so two players watching one machine are editing one object,
+ * and so is {@code MachineTicker}. Nothing is copied anywhere and nothing needs syncing
+ * back: a click writes the same slots the ticker reads and {@code MachineStateCodec}
+ * encodes. A normal close therefore does nothing at all to the items.
  *
- * <p>The processing gate ({@link #mayRun}) and the status-indicator decision
- * ({@link #indicatorStateOf}) are pure functions over primitives/enums -- no
- * {@code org.bukkit} type -- so {@code FurnaceGuiTest} exercises every combination
- * with no running server, following the same pattern as
- * {@code MetalClassifier.resolveBranch}.
+ * <p>This class contributes exactly two things to that inventory -- the filler panes and
+ * the status indicator (see {@link #paintDecoration} and {@link #refreshIndicator}) --
+ * neither of which is machine contents and neither of which is ever persisted.
+ * {@link #returnAllItems} is reserved for the two cases where there is no machine left to
+ * hold the items: {@link #closeForBlock} (the block is about to be broken) and
+ * {@link #closeAll} (shutdown, and only when the state could not be persisted).
+ *
+ * <p>The status-indicator decision ({@link #indicatorStateOf}) is a pure function over
+ * primitives -- no {@code org.bukkit} type -- so {@code FurnaceGuiTest} exercises every
+ * combination with no running server. What counts as fuel and whether the output slot
+ * can accept a result are machine rules, not view logic, and live in
+ * {@link MachineRules}; recipe resolution and the run itself belong to
+ * {@code MachineTicker}. This class renders their consequences and moves items; it
+ * decides none of them.
  */
 public final class FurnaceGui {
 
@@ -73,20 +75,24 @@ public final class FurnaceGui {
 
     /** What the non-interactive status indicator (slot {@link GuiLayout#INDICATOR_SLOT}) should show. */
     public enum IndicatorState {
-        /** Powered (or signal not required) and fuel present: the machine will process on the next attempt. */
+        /** Powered (or signal not required) and fuel present, but no run is currently advancing. */
         RUNNING,
         /** {@code machine.require-redstone-signal} is {@code true} and the machine is not currently powered. */
         NO_SIGNAL,
-        /** Powered (or signal not required), but the fuel slot lacks enough redstone. */
-        NO_FUEL
+        /** Powered (or signal not required), but the fuel slot holds no redstone. */
+        NO_FUEL,
+        /** A run is currently advancing ({@code progressTicks > 0}). */
+        SMELTING
     }
 
     /**
-     * Decides the status indicator's state from plain booleans. {@code NO_SIGNAL}
-     * takes precedence over {@code NO_FUEL} when both apply: the more fundamental
-     * blocker is reported first.
+     * Decides the status indicator's state from plain booleans. Precedence, most
+     * fundamental blocker first: {@code NO_SIGNAL > NO_FUEL > SMELTING > RUNNING}. A
+     * signal or fuel problem is reported even mid-run, since {@code MachineTicker}
+     * (not this method) is what decides whether a stalled run holds its progress.
      */
-    public static IndicatorState indicatorStateOf(boolean powered, boolean requireSignal, boolean hasFuel) {
+    public static IndicatorState indicatorStateOf(boolean powered, boolean requireSignal,
+                                                  boolean hasFuel, boolean smelting) {
         boolean effectivePowered = !requireSignal || powered;
         if (!effectivePowered) {
             return IndicatorState.NO_SIGNAL;
@@ -94,282 +100,113 @@ public final class FurnaceGui {
         if (!hasFuel) {
             return IndicatorState.NO_FUEL;
         }
+        if (smelting) {
+            return IndicatorState.SMELTING;
+        }
         return IndicatorState.RUNNING;
-    }
-
-    /** What the output slot currently holds, relative to the item an operation would produce. */
-    public enum OutputSlotState {
-        /** The output slot is empty. */
-        EMPTY,
-        /** The output slot holds an item that matches what would be produced, with room to merge. */
-        SAME_ITEM,
-        /** The output slot holds something else -- or the same item with no room left -- blocking the run. */
-        DIFFERENT_ITEM
-    }
-
-    /**
-     * The processing gate: an operation may run only when effectively powered
-     * (powered, or {@code requireSignal} is {@code false}), fuel is present, and the
-     * output slot does not block it. An output slot occupied by a different item (or
-     * the same item with no stacking room left) never runs and never consumes fuel --
-     * a player's output is never silently overwritten or corrupted.
-     */
-    public static boolean mayRun(boolean powered, boolean requireSignal, boolean hasFuel, OutputSlotState outputSlotState) {
-        boolean effectivePowered = !requireSignal || powered;
-        return effectivePowered && hasFuel && outputSlotState != OutputSlotState.DIFFERENT_ITEM;
     }
 
     // =================================================================================
     // Bukkit-facing glue
     // =================================================================================
 
-    /** Marks a custom inventory as belonging to one specific Electric Furnace block. */
-    public static final class Holder implements InventoryHolder {
-        private final Block block;
-        private Inventory inventory;
-
-        private Holder(Block block) {
-            this.block = Objects.requireNonNull(block, "block");
-        }
-
-        /** The Electric Furnace block this GUI instance belongs to. */
-        public Block block() {
-            return block;
-        }
-
-        @Override
-        public Inventory getInventory() {
-            return inventory;
-        }
-    }
-
     /** Whether {@code inventory} is an Electric Furnace GUI. */
     public static boolean isFurnaceGui(Inventory inventory) {
-        return inventory != null && inventory.getHolder() instanceof Holder;
+        return inventory != null && inventory.getHolder() instanceof MachineState;
     }
 
-    /** The block a given Electric Furnace GUI inventory belongs to, if it is one. */
-    public static Optional<Block> blockOf(Inventory inventory) {
-        if (inventory != null && inventory.getHolder() instanceof Holder holder) {
-            return Optional.of(holder.block());
+    /** The machine whose contents {@code inventory} holds, if it is a furnace GUI. */
+    public static Optional<MachineState> stateOf(Inventory inventory) {
+        if (inventory != null && inventory.getHolder() instanceof MachineState state) {
+            return Optional.of(state);
         }
         return Optional.empty();
     }
 
+    /** The block a given Electric Furnace GUI inventory belongs to, if it is one. */
+    public static Optional<Block> blockOf(Inventory inventory) {
+        return stateOf(inventory).map(MachineState::block);
+    }
+
     /**
-     * Opens a brand-new Electric Furnace GUI for {@code player} at {@code block}.
-     * Always starts empty -- see the class-level note on why nothing persists across
-     * sessions.
+     * Opens {@code block}'s Electric Furnace GUI for {@code player}.
+     *
+     * <p>There is nothing to build and nothing to populate: {@code state} already owns
+     * the inventory that holds its items, so this paints the decoration onto it and hands
+     * that same instance over. A second viewer of the same machine is handed the same
+     * object again -- which is why no viewer registry, and no scan of online players to
+     * find an existing view, is needed to keep two viewers consistent.
      */
-    public static Inventory open(Player player, Block block, EfConfig config, boolean powered) {
+    public static Inventory open(Player player, Block block, EfConfig config, boolean powered, MachineState state) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(block, "block");
         Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(state, "state");
 
-        Holder holder = new Holder(block);
-        Inventory inventory = Bukkit.createInventory(holder, GuiLayout.SIZE, Component.text(GuiLayout.TITLE_TEXT));
-        holder.inventory = inventory;
-
-        for (int slot = 0; slot < GuiLayout.SIZE; slot++) {
-            if (GuiLayout.roleOf(slot) == GuiLayout.SlotRole.FILLER) {
-                inventory.setItem(slot, buildFillerItem());
-            }
-        }
-        refreshIndicator(inventory, config, powered);
+        Inventory inventory = state.getInventory();
+        paintDecoration(inventory);
+        refreshIndicator(inventory, config, powered, !state.isIdle(), state.progressTicks(),
+                config.machine().smeltTicks());
 
         player.openInventory(inventory);
         return inventory;
     }
 
-    /** Recomputes and redraws the status indicator item from the inventory's current fuel slot. */
-    public static void refreshIndicator(Inventory inventory, EfConfig config, boolean powered) {
+    /**
+     * Draws the non-interactive filler panes into every slot that has no functional role.
+     *
+     * <p>Idempotent, and deliberately called on every {@link #open} rather than once at
+     * inventory creation: the panes are decoration, not contents, so they are never
+     * persisted by {@code MachineStateCodec} and are therefore absent from a machine
+     * freshly hydrated from disk. Painting them at open is what makes "not persisted"
+     * invisible to a player.
+     */
+    private static void paintDecoration(Inventory inventory) {
+        for (int slot = 0; slot < GuiLayout.SIZE; slot++) {
+            if (GuiLayout.roleOf(slot) == GuiLayout.SlotRole.FILLER) {
+                inventory.setItem(slot, buildFillerItem());
+            }
+        }
+    }
+
+    /**
+     * Every currently-open Electric Furnace GUI, keyed by the block it belongs to, from
+     * a single pass over the online players.
+     *
+     * <p>{@code MachineTicker} uses this to decide which machines have a viewer worth
+     * repainting the status indicator for. {@link #open} does not need it -- a machine's
+     * inventory is reachable directly from its {@link MachineState} -- so this is a
+     * rendering optimisation only, never a correctness dependency. Two viewers of the
+     * same machine share one {@code Inventory}, so the map has one entry per machine.
+     */
+    public static Map<Block, Inventory> openInventoriesByBlock() {
+        Map<Block, Inventory> open = new HashMap<>();
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            Inventory top = viewer.getOpenInventory().getTopInventory();
+            if (top != null && top.getHolder() instanceof MachineState state) {
+                open.putIfAbsent(state.block(), top);
+            }
+        }
+        return open;
+    }
+
+    /**
+     * Recomputes and redraws the status indicator item from the inventory's current
+     * fuel slot plus the caller-supplied power/progress facts.
+     */
+    public static void refreshIndicator(Inventory inventory, EfConfig config, boolean powered,
+                                        boolean smelting, int progressTicks, int smeltTicks) {
         Objects.requireNonNull(inventory, "inventory");
         Objects.requireNonNull(config, "config");
 
-        boolean hasFuel = hasSufficientFuel(inventory, config.machine().fuelPerOperation());
-        IndicatorState state = indicatorStateOf(powered, config.machine().requireRedstoneSignal(), hasFuel);
-        inventory.setItem(GuiLayout.INDICATOR_SLOT, indicatorItem(state));
+        boolean hasFuel = hasFuel(inventory);
+        IndicatorState state = indicatorStateOf(powered, config.machine().requireRedstoneSignal(), hasFuel, smelting);
+        inventory.setItem(GuiLayout.INDICATOR_SLOT, indicatorItem(state, progressTicks, smeltTicks));
     }
 
-    private static boolean hasSufficientFuel(Inventory inventory, int fuelPerOperation) {
-        ItemStack fuel = inventory.getItem(GuiLayout.FUEL_SLOT);
-        return fuel != null && fuel.getType() == Material.REDSTONE && fuel.getAmount() >= fuelPerOperation;
-    }
-
-    /**
-     * Attempts one recycler operation against {@code inventory}'s current input/fuel
-     * slots. Always redraws the status indicator, whether or not the attempt
-     * succeeds.
-     *
-     * @return {@code true} if an operation ran (fuel consumed, output produced)
-     */
-    public static boolean tryProcess(Inventory inventory, EfConfig config, AlloyRegistry alloys, boolean powered) {
-        Objects.requireNonNull(inventory, "inventory");
-        Objects.requireNonNull(config, "config");
-        Objects.requireNonNull(alloys, "alloys");
-
-        List<RecycleInput> inputs = collectInputs(inventory, config);
-        RecycleResult result = RecycleResolver.resolve(inputs, config.recycling(), alloys);
-
-        refreshIndicator(inventory, config, powered);
-
-        if (result instanceof RecycleResult.Rejected) {
-            return false;
-        }
-
-        boolean hasFuel = hasSufficientFuel(inventory, config.machine().fuelPerOperation());
-        ItemStack candidateOutput = candidateItemFor(result, alloys);
-        if (candidateOutput == null) {
-            // Unknown alloy id (already logged) -- treat exactly like a rejected run:
-            // nothing consumed, nothing produced.
-            return false;
-        }
-        ItemStack currentOutput = inventory.getItem(GuiLayout.OUTPUT_SLOT);
-        OutputSlotState outputState = classifyOutputSlot(currentOutput, candidateOutput);
-
-        if (!mayRun(powered, config.machine().requireRedstoneSignal(), hasFuel, outputState)) {
-            return false;
-        }
-
-        consumeFuel(inventory, config.machine().fuelPerOperation());
-        depositOutput(inventory, currentOutput, candidateOutput);
-        consumeOneFromEachOccupiedInputSlot(inventory);
-
-        refreshIndicator(inventory, config, powered);
-        return true;
-    }
-
-    private static List<RecycleInput> collectInputs(Inventory inventory, EfConfig config) {
-        List<RecycleInput> inputs = new ArrayList<>();
-        for (int slot : GuiLayout.INPUT_SLOTS) {
-            ItemStack item = inventory.getItem(slot);
-            if (item == null || item.getType() == Material.AIR) {
-                continue;
-            }
-            inputs.add(MetalClassifier.classify(item, config.recycling())
-                    .orElseGet(() -> new RecycleInput(item.getType().name(), null, false, false, null, 0)));
-        }
-        return inputs;
-    }
-
-    private static void consumeFuel(Inventory inventory, int fuelPerOperation) {
-        ItemStack fuel = inventory.getItem(GuiLayout.FUEL_SLOT);
-        int remaining = fuel.getAmount() - fuelPerOperation;
-        if (remaining <= 0) {
-            inventory.setItem(GuiLayout.FUEL_SLOT, null);
-        } else {
-            fuel.setAmount(remaining);
-        }
-    }
-
-    private static void depositOutput(Inventory inventory, ItemStack currentOutput, ItemStack candidateOutput) {
-        if (currentOutput == null || currentOutput.getType() == Material.AIR) {
-            inventory.setItem(GuiLayout.OUTPUT_SLOT, candidateOutput);
-        } else {
-            currentOutput.setAmount(currentOutput.getAmount() + candidateOutput.getAmount());
-        }
-    }
-
-    /**
-     * Consumes exactly one item from each currently-occupied input slot -- never the
-     * whole stack. A slot holding more than one item (e.g. a player queued up a stack
-     * of 5 iron ingots in one slot) keeps its remaining items for the next operation;
-     * clearing the whole slot here would silently destroy them.
-     */
-    private static void consumeOneFromEachOccupiedInputSlot(Inventory inventory) {
-        for (int slot : GuiLayout.INPUT_SLOTS) {
-            ItemStack item = inventory.getItem(slot);
-            if (item == null || item.getType() == Material.AIR) {
-                continue;
-            }
-            int remaining = item.getAmount() - 1;
-            if (remaining <= 0) {
-                inventory.setItem(slot, null);
-            } else {
-                item.setAmount(remaining);
-            }
-        }
-    }
-
-    /**
-     * Compares the output slot's current contents against what an operation would
-     * produce. Blocks the run (returns {@link OutputSlotState#DIFFERENT_ITEM}) not
-     * only when a genuinely different item occupies the slot, but also when merging
-     * would exceed the max stack size -- an overflowing stack is exactly the kind of
-     * silent corruption this plugin must never cause.
-     */
-    static OutputSlotState classifyOutputSlot(ItemStack current, ItemStack candidate) {
-        if (current == null || current.getType() == Material.AIR) {
-            if (candidate == null) {
-                return OutputSlotState.DIFFERENT_ITEM;
-            }
-            // An empty slot is only usable if the candidate itself fits in one stack.
-            // Without this, depositOutput would setItem an oversized stack into the
-            // slot -- the same silent corruption the SAME_ITEM branch already blocks.
-            if (candidate.getAmount() > candidate.getMaxStackSize()) {
-                return OutputSlotState.DIFFERENT_ITEM;
-            }
-            return OutputSlotState.EMPTY;
-        }
-        if (candidate == null || !current.isSimilar(candidate)) {
-            return OutputSlotState.DIFFERENT_ITEM;
-        }
-        if (current.getAmount() + candidate.getAmount() > current.getMaxStackSize()) {
-            return OutputSlotState.DIFFERENT_ITEM;
-        }
-        return OutputSlotState.SAME_ITEM;
-    }
-
-    private static ItemStack candidateItemFor(RecycleResult result, AlloyRegistry alloys) {
-        if (result instanceof RecycleResult.SameMetal sameMetal) {
-            ItemStack stack = new ItemStack(ingotMaterialOf(sameMetal.metal()));
-            stack.setAmount(sameMetal.amount());
-            return stack;
-        }
-        if (result instanceof RecycleResult.NamedAlloy namedAlloy) {
-            return alloyStack(namedAlloy.alloyId(), namedAlloy.amount(), alloys);
-        }
-        if (result instanceof RecycleResult.GenericAlloy genericAlloy) {
-            return alloyStack(genericAlloy.alloyId(), genericAlloy.amount(), alloys);
-        }
-        if (result instanceof RecycleResult.Remelt remelt) {
-            return alloyStack(remelt.alloyId(), remelt.amount(), alloys);
-        }
-        // Rejected: callers return early on Rejected before calling this. Return null
-        // rather than throwing -- see alloyStack for why nothing here may throw.
-        return null;
-    }
-
-    /**
-     * Builds the item for a resolved alloy id, or {@code null} if the registry does not
-     * know that id.
-     *
-     * <p><b>Never throws.</b> This runs inside a scheduled task fired off a GUI click;
-     * an exception here is swallowed by the scheduler and aborts the operation partway
-     * through, which is exactly how items get destroyed. A config referencing an alloy
-     * id with no definition is a configuration error, not a reason to fail mid-run: we
-     * log it once, naming the id, and the caller treats the run as rejected -- no fuel
-     * consumed, no inputs consumed, no output written.
-     */
-    private static ItemStack alloyStack(String alloyId, int amount, AlloyRegistry alloys) {
-        Optional<AlloyDefinition> definition = alloys.get(alloyId);
-        if (definition.isEmpty()) {
-            LOGGER.warning("ElectricFurnace: recycler resolved to unknown alloy id '" + alloyId
-                    + "'; rejecting this operation. Check the 'alloys' section of config.yml.");
-            return null;
-        }
-        ItemStack stack = AlloyItemFactory.create(definition.get());
-        stack.setAmount(amount);
-        return stack;
-    }
-
-    private static Material ingotMaterialOf(MetalType metal) {
-        return switch (metal) {
-            case IRON -> Material.IRON_INGOT;
-            case GOLD -> Material.GOLD_INGOT;
-            case COPPER -> Material.COPPER_INGOT;
-            case NETHERITE -> Material.NETHERITE_INGOT;
-        };
+    /** Whether the fuel slot holds redstone at all -- see {@link MachineRules#hasFuel}. */
+    private static boolean hasFuel(Inventory inventory) {
+        return MachineRules.hasFuel(inventory.getItem(GuiLayout.FUEL_SLOT));
     }
 
     // ---- Shift-click routing (see MachineGuiListener's shift-click note) ------------
@@ -466,6 +303,13 @@ public final class FurnaceGui {
             return 0;
         }
         existing.setAmount(existing.getAmount() + move);
+        // Write the grown stack back explicitly. Mutating what getItem returned happens
+        // to reach the real slot on CraftBukkit, which returns a wrapper around the live
+        // stack, but the Bukkit API promises no such thing -- and this inventory is now
+        // the machine's only copy of these items, so "correct by implementation accident"
+        // is not good enough here. On an implementation that hands back a copy, the line
+        // above alone would silently consume from the player's stack and add nothing.
+        inventory.setItem(slot, existing);
         source.setAmount(source.getAmount() - move);
         return move;
     }
@@ -476,6 +320,17 @@ public final class FurnaceGui {
      * Unconditionally returns every input, fuel, and output item currently in
      * {@code inventory} to {@code player}, dropping at the player's location whatever
      * does not fit in their inventory. Nothing is ever silently destroyed.
+     *
+     * <p>Reserved for the two cases where there is no machine state left to hold the
+     * items: {@link #closeForBlock} (the block is being broken) and {@link #closeAll}
+     * (shutdown, only when persisting failed). A normal close does not call this: the
+     * items are already in the machine's own storage and simply stay there.
+     *
+     * <p><b>Gives before clearing, per slot -- do not reorder.</b> If {@link #giveOrDrop}
+     * -&gt; {@code dropItemNaturally} throws, which it can during world teardown, the
+     * item is still sitting in its slot when the exception propagates. Clearing first
+     * would leave that item existing in zero places: not on the player, not dropped, and
+     * no longer in the inventory.
      */
     public static void returnAllItems(Inventory inventory, Player player) {
         Objects.requireNonNull(inventory, "inventory");
@@ -490,8 +345,8 @@ public final class FurnaceGui {
             if (item == null || item.getType() == Material.AIR) {
                 continue;
             }
-            inventory.setItem(slot, null);
             giveOrDrop(player, item);
+            inventory.setItem(slot, null);
         }
     }
 
@@ -504,91 +359,204 @@ public final class FurnaceGui {
 
     /**
      * Force-closes any online player currently viewing {@code block}'s Electric
-     * Furnace GUI. Closing synchronously fires {@code InventoryCloseEvent}, so the
-     * normal close handler ({@code MachineGuiListener#onClose}) returns their items
-     * before this method returns -- callers (e.g. a block break) can safely proceed
-     * immediately afterward.
+     * Furnace GUI, returning their items directly first.
+     *
+     * <p>The block is about to stop existing, so there is no machine left for these
+     * items to belong to -- unlike a normal close, which leaves them in the machine's own
+     * storage, this returns them straight to the viewer. Items are returned <em>before</em> {@link Player#closeInventory()} is
+     * called, exactly like {@link #closeAll} already does.
+     *
+     * <p><b>Does not depend on {@code InventoryCloseEvent}.</b> If any viewer's items
+     * were returned, {@code block}'s state in {@code store} is cleared directly (via
+     * {@link MachineStore#forget}) before this method returns, rather than trusting
+     * {@code player.closeInventory()} to fire an event that reaches
+     * {@code MachineGuiListener#onClose}. If that event were ever missed,
+     * {@code MachineState} would still hold the items just handed to the viewer and
+     * {@code MachineBlockListener}'s {@code dropStoreContents} would drop the same items
+     * on the ground -- duplicating them.
+     *
+     * @param store the machine state store, or {@code null} if it failed to wire up.
+     *              Items are still returned when {@code store} is {@code null}; only
+     *              the state-clearing step is skipped, since there is nothing to clear.
      */
-    public static void closeForBlock(Block block) {
+    public static void closeForBlock(Block block, MachineStore store) {
         Objects.requireNonNull(block, "block");
+        boolean returnedAny = false;
         for (Player player : Bukkit.getOnlinePlayers()) {
             Inventory top = player.getOpenInventory().getTopInventory();
-            if (top.getHolder() instanceof Holder holder && holder.block().equals(block)) {
+            if (top.getHolder() instanceof MachineState state && state.block().equals(block)) {
+                returnAllItems(top, player);
                 player.closeInventory();
+                returnedAny = true;
             }
         }
-    }
-
-    /**
-     * Force-closes every online player currently viewing any Electric Furnace GUI,
-     * returning their items first. Intended for the plugin's {@code onDisable}.
-     *
-     * <p><b>Why this returns items itself instead of relying on the close handler.</b>
-     * Unlike {@link #closeForBlock}, this method runs during shutdown, when event
-     * dispatch to this plugin is already dead: {@code JavaPlugin.setEnabled(false)}
-     * clears {@code isEnabled} <em>before</em> invoking {@code onDisable()}, and
-     * {@code SimplePluginManager#fireEvent} skips every {@code RegisteredListener}
-     * whose plugin is disabled. So {@code MachineGuiListener#onClose} would never run
-     * here, and every input, fuel, and output item would be silently destroyed as the
-     * inventories closed. {@link #returnAllItems} is called directly, before the close.
-     *
-     * <p>Calling it here is safe even if the close handler <em>does</em> also fire (for
-     * any caller that invokes this while the plugin is still enabled):
-     * {@link #returnAllItems} nulls each slot as it drains it, so a second pass finds
-     * the inventory empty and returns nothing. It is idempotent, never duplicating.
-     */
-    public static void closeAll() {
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            Inventory top = player.getOpenInventory().getTopInventory();
-            if (!(top.getHolder() instanceof Holder)) {
-                continue;
-            }
-            for (ShutdownStep step : shutdownSteps()) {
-                switch (step) {
-                    case RETURN_ITEMS -> returnAllItems(top, player);
-                    case CLOSE_INVENTORY -> player.closeInventory();
-                }
-            }
+        if (returnedAny && store != null) {
+            store.forget(block);
         }
     }
 
     /** One step of the per-viewer shutdown sequence performed by {@link #closeAll}. */
-    public enum ShutdownStep {
-        /** Drain input/fuel/output back to the viewing player. */
-        RETURN_ITEMS,
-        /** Close the now-empty inventory. */
-        CLOSE_INVENTORY
+    public enum CloseAllStep {
+        /**
+         * Sync the inventory into machine state and flush it to the block's PDC.
+         * Already attempted by {@link #closeAll} before this list is consulted --
+         * {@link #closeAllSteps} takes the outcome as a parameter rather than deciding
+         * it, since deciding it requires the Bukkit/PDC call that cannot be made from
+         * pure data. This step exists in the sequence so the ordering guarantee below
+         * is enforced by an exhaustive {@code switch} over the enum, not restated.
+         */
+        PERSIST,
+        /**
+         * Clear the block's persisted state (nothing may be left duplicated in the
+         * PDC), then return every item directly to the viewer.
+         */
+        RETURN,
+        /** Close the now-settled inventory. */
+        CLOSE
     }
 
     /**
-     * The ordered steps {@link #closeAll} performs for each viewer.
+     * The ordered steps {@link #closeAll} performs for one viewer, given whether
+     * persisting that viewer's machine succeeded.
      *
-     * <p>Extracted as data, and driven directly by {@link #closeAll}, so the one
-     * property that actually prevents item loss on shutdown is pinned by a unit test
-     * with no server: {@link ShutdownStep#RETURN_ITEMS} must be present and must come
-     * before {@link ShutdownStep#CLOSE_INVENTORY}. Dropping the return step, or
-     * reordering it after the close (which would put us back to relying on an
-     * {@code InventoryCloseEvent} that never fires during {@code onDisable}), fails
-     * {@code FurnaceGuiTest}.
+     * <p>Extracted as data, and driven directly by {@link #closeAll}, so the property
+     * that keeps shutdown from ever losing <em>or</em> duplicating an item is pinned by
+     * a unit test with no server: the item-safety step ({@link CloseAllStep#PERSIST} or
+     * {@link CloseAllStep#RETURN}) always comes before {@link CloseAllStep#CLOSE}.
+     * Reordering it after {@code CLOSE} would put us back to relying on an
+     * {@code InventoryCloseEvent} that never fires during {@code onDisable} -- see
+     * {@link #closeAll}'s note on why that dependency is unsafe here.
      */
-    public static List<ShutdownStep> shutdownSteps() {
-        return List.of(ShutdownStep.RETURN_ITEMS, ShutdownStep.CLOSE_INVENTORY);
+    public static List<CloseAllStep> closeAllSteps(boolean persistSucceeded) {
+        return persistSucceeded
+                ? List.of(CloseAllStep.PERSIST, CloseAllStep.CLOSE)
+                : List.of(CloseAllStep.RETURN, CloseAllStep.CLOSE);
     }
 
-    private static ItemStack indicatorItem(IndicatorState state) {
+    /**
+     * Force-closes every online player currently viewing any Electric Furnace GUI.
+     * Intended for the plugin's {@code onDisable}, called <em>after</em>
+     * {@code MachineStore#flushAll()}.
+     *
+     * <p>For each open GUI, this makes one more attempt to fold its current contents
+     * into its machine's state and flush that state to the block's PDC directly --
+     * closing the gap between "flushAll already ran" and "this particular inventory
+     * had unsynced edits sitting in it at that exact moment." The outcome selects which
+     * branch of {@link #closeAllSteps} runs: on success, nothing more needs to happen
+     * to the block's state (already flushed) before closing; on failure -- including
+     * when {@code store} itself failed to wire up -- the block's state is cleared via
+     * {@link MachineStore#forget} <em>before</em> the items are returned directly to
+     * the viewer, exactly like the pre-persistence model did unconditionally. That
+     * clearing step is what stops a machine whose earlier {@code flushAll()} already
+     * succeeded from ending up with its contents in both the block's PDC and the
+     * player's inventory. Neither branch relies on {@code InventoryCloseEvent}: Bukkit
+     * clears {@code isEnabled} <em>before</em> invoking {@code onDisable()}, and
+     * {@code SimplePluginManager#fireEvent} skips every {@code RegisteredListener}
+     * belonging to a disabled plugin, so {@code MachineGuiListener#onClose} never runs
+     * here.
+     *
+     * <p>Each viewer's body ({@link #persist}, {@link #closeAllSteps}'s steps) runs
+     * inside its own {@code try}/{@code catch (Throwable)}: {@link MachineStore#forget}
+     * and {@link #returnAllItems} (via {@code dropItemNaturally}) can both still throw
+     * during world teardown even though {@link #persist} already swallows its own
+     * failures, and an uncaught throw here would abort the loop for every remaining
+     * viewer -- or, worse, strand one viewer's items outright if it landed between
+     * {@code forget} clearing the PDC and {@code returnAllItems} handing the items
+     * over. A failure is logged and shutdown moves on to the next viewer.
+     */
+    public static void closeAll(MachineStore store) {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            Inventory top = player.getOpenInventory().getTopInventory();
+            if (!(top.getHolder() instanceof MachineState state)) {
+                continue;
+            }
+            Block block = state.block();
+            // Per-viewer try/catch: persist() already swallows its own failures, but
+            // store.forget (whose block.getState() call is not itself guarded -- see
+            // MachineStore#forget) and returnAllItems -> dropItemNaturally can both
+            // still throw here, e.g. during world teardown. Without this guard, a throw
+            // would abort the loop for every remaining viewer; worse, a throw between
+            // forget and returnAllItems would destroy that one viewer's items outright
+            // (PDC already cleared, inventory never handed over). Logging and moving on
+            // keeps one bad viewer from stranding the rest.
+            try {
+                boolean persisted = persist(block, store);
+                for (CloseAllStep step : closeAllSteps(persisted)) {
+                    switch (step) {
+                        case PERSIST -> {
+                            // Nothing further to do -- persisted (computed above)
+                            // already captures that this attempt succeeded.
+                        }
+                        case RETURN -> {
+                            if (store != null) {
+                                store.forget(block);
+                            }
+                            returnAllItems(top, player);
+                        }
+                        case CLOSE -> player.closeInventory();
+                    }
+                }
+            } catch (Throwable t) {
+                LOGGER.warning("ElectricFurnace: failed to close the Electric Furnace GUI for "
+                        + player.getName() + " at " + describe(block) + " during shutdown ("
+                        + t.getClass().getName() + ": " + t.getMessage()
+                        + "); continuing to the next viewer.");
+            }
+        }
+    }
+
+    /**
+     * Attempts to flush {@code block}'s machine state to its PDC.
+     *
+     * <p>There is no "sync the inventory into state" step any more, and none is missing:
+     * the inventory <em>is</em> the state's storage, so whatever the viewer last did to
+     * it is already what {@code MachineStateCodec} will encode.
+     */
+    private static boolean persist(Block block, MachineStore store) {
+        // store can be null here even though FurnaceGui itself never stores it: this is
+        // a static utility, and ElectricFurnacePlugin#onDisable calls closeAll(store)
+        // unconditionally -- including when the "machine store" wiring step in onEnable
+        // failed and the field was never assigned. Calling closeAll in that case is
+        // still correct (items must still be returned to viewers); this check is what
+        // makes that safe rather than an NPE the catch below would otherwise mask.
+        if (store == null) {
+            return false;
+        }
+        try {
+            store.flush(block);
+            return true;
+        } catch (Throwable t) {
+            LOGGER.warning("ElectricFurnace: failed to persist machine state during shutdown at "
+                    + describe(block) + " (" + t.getClass().getName() + ": " + t.getMessage()
+                    + "); returning items to the viewing player instead.");
+            return false;
+        }
+    }
+
+    private static String describe(Block block) {
+        return block.getWorld().getName() + " " + block.getX() + "," + block.getY() + "," + block.getZ();
+    }
+
+    private static ItemStack indicatorItem(IndicatorState state, int progressTicks, int smeltTicks) {
         Material material = switch (state) {
             case RUNNING -> Material.REDSTONE_TORCH;
             case NO_SIGNAL -> Material.LEVER;
             case NO_FUEL -> Material.REDSTONE;
+            case SMELTING -> Material.BLAST_FURNACE;
         };
         String label = switch (state) {
             case RUNNING -> "Running";
             case NO_SIGNAL -> "No redstone signal";
             case NO_FUEL -> "No fuel";
+            case SMELTING -> "Smelting";
         };
         ItemStack stack = new ItemStack(material);
         ItemMeta meta = stack.getItemMeta();
         meta.displayName(Component.text(label).decoration(TextDecoration.ITALIC, false));
+        if (state == IndicatorState.SMELTING) {
+            meta.lore(List.of(Component.text(ProgressBar.render(progressTicks, smeltTicks))
+                    .decoration(TextDecoration.ITALIC, false)));
+        }
         stack.setItemMeta(meta);
         return stack;
     }

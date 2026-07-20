@@ -20,6 +20,8 @@ import org.xpfarm.electricfurnace.listener.MachineBlockListener;
 import org.xpfarm.electricfurnace.listener.MachineGuiListener;
 import org.xpfarm.electricfurnace.listener.RedstoneListener;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
+import org.xpfarm.electricfurnace.machine.MachineStore;
+import org.xpfarm.electricfurnace.machine.MachineTicker;
 import org.xpfarm.electricfurnace.recipe.MachineRecipe;
 
 import java.util.List;
@@ -46,21 +48,38 @@ import java.util.List;
  * the values directly would have pinned each collaborator to the config it was
  * constructed with, and a reload would silently do nothing to them.
  *
- * <h2>Shutdown returns items</h2>
+ * <h2>Shutdown never loses items</h2>
  *
- * <p>{@link #onDisable} calls {@link FurnaceGui#closeAll()}, which returns each
- * viewer's items <em>itself</em> rather than relying on {@code InventoryCloseEvent}.
- * Bukkit clears {@code isEnabled} before invoking {@code onDisable}, and
- * {@code SimplePluginManager} skips listeners belonging to a disabled plugin -- so
- * {@code MachineGuiListener#onClose} never fires here, and anything left to it would
- * be destroyed. See the note on {@code FurnaceGui#closeAll}.
+ * <p>{@link #onDisable} stops {@link MachineTicker} <em>first</em>, then calls
+ * {@link MachineStore#flushAll()}, then {@link FurnaceGui#closeAll(MachineStore)}, then
+ * stops {@link MachineEffects} last. The ticker is stopped before anything else touches
+ * machine state so nothing mutates a {@link org.xpfarm.electricfurnace.machine.MachineState}
+ * out from under {@code flushAll}/{@code closeAll} mid-shutdown. {@code flushAll} then
+ * runs <em>before</em> {@code closeAll} for a second, independent reason: Bukkit clears
+ * {@code isEnabled} before invoking {@code onDisable}, and {@code SimplePluginManager}
+ * skips listeners belonging to a disabled plugin -- so neither
+ * {@code MachineGuiListener#onClose} nor {@link MachineStore}'s own
+ * {@code ChunkUnloadEvent}/{@code WorldSaveEvent} handlers ever fire here. Each class
+ * works around this the same way: by calling its item-safety logic directly as a
+ * plain method rather than relying on event dispatch. {@code flushAll} runs first
+ * because it persists every live machine's state to its own PDC; {@code closeAll}
+ * runs second and makes one more per-open-GUI attempt to sync and flush that specific
+ * machine, only returning items directly to the viewing player if that attempt fails.
+ * See the notes on {@code MachineStore#flushAll} and {@code FurnaceGui#closeAll}. All
+ * three steps -- stopping the ticker, {@code flushAll}, and {@code closeAll} -- are
+ * individually wrapped in their own {@code try}/{@code catch}: an unguarded throw
+ * from any one of them would abort {@code onDisable} before the steps after it ever
+ * ran, and for the ticker in particular, which runs first, that would mean losing
+ * every live machine's state before {@code flushAll} got a chance to persist it.
  */
 public final class ElectricFurnacePlugin extends JavaPlugin {
 
     private EfConfig config;
     private AlloyRegistry alloys;
     private MachineRegistry machines;
+    private MachineStore store;
     private MachineEffects effects;
+    private MachineTicker ticker;
 
     @Override
     public void onEnable() {
@@ -81,13 +100,42 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
 
         step("machine registry", () -> machines = new MachineRegistry(this::warn));
 
+        step("machine store", () -> {
+            store = new MachineStore(this, machines);
+            getServer().getPluginManager().registerEvents(store, this);
+            // MachineStore#onChunkLoad only covers chunks that load AFTER the line
+            // above registers it. A chunk already resident in memory when the plugin
+            // enables -- the common case on a server restart -- would otherwise never
+            // hydrate at all, and a mid-smelt machine in it would silently stop
+            // running until something incidental (a GUI open, a redstone change)
+            // happened to touch it. See MachineStore's class-level "Every path a
+            // machine can (re-)enter memory" note.
+            store.hydrateLoadedChunks();
+        });
+
+        // Ordering below this point follows the task spec exactly: config -> registry
+        // -> store -> effects -> ticker -> listeners. Effects and the ticker are both
+        // schedule-only until start()/registerEvents() run, so nothing observable
+        // depends on this order today, but keeping it matches the documented contract
+        // and keeps onDisable's mirrored (reverse-ish) order easy to reason about.
+        step("effects", () -> {
+            effects = new MachineEffects(this, machines, store, this::config);
+            getServer().getPluginManager().registerEvents(effects, this);
+            effects.start();
+        });
+
+        step("ticker", () -> {
+            ticker = new MachineTicker(this, store, this::config, this::alloys);
+            ticker.start();
+        });
+
         step("listeners", () -> {
             getServer().getPluginManager().registerEvents(
-                    new MachineBlockListener(machines, this::config), this);
+                    new MachineBlockListener(machines, store, this::config), this);
             getServer().getPluginManager().registerEvents(
-                    new MachineGuiListener(this, this::config, this::alloys), this);
+                    new MachineGuiListener(this::config), this);
             getServer().getPluginManager().registerEvents(
-                    new RedstoneListener(machines, this::config, this::alloys), this);
+                    new RedstoneListener(machines, store, this::config), this);
         });
 
         step("command", () -> {
@@ -108,28 +156,57 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(new MachineRecipe(), this);
         });
 
-        step("effects", () -> {
-            effects = new MachineEffects(this, machines, this::config);
-            getServer().getPluginManager().registerEvents(effects, this);
-            effects.start();
-        });
-
         getLogger().info("ElectricFurnace enabled (" + alloys.all().size() + " alloys, effects "
-                + (effects != null && effects.isRunning() ? "on" : "off") + ").");
+                + (effects != null && effects.isRunning() ? "on" : "off") + ", ticker "
+                + (ticker != null && ticker.isRunning() ? "on" : "off") + ").");
     }
 
     @Override
     public void onDisable() {
-        if (effects != null) {
-            effects.stop();
+        // Stopped FIRST, before anything else touches machine state: once this
+        // returns, nothing on the server is still mutating a MachineState, so
+        // flushAll/closeAll below see a value that will not change out from under them
+        // mid-shutdown. Guarded like the two steps below it: task.cancel() throwing
+        // (unwrapped) would abort onDisable before flushAll ever runs, losing every
+        // live machine's state -- the one thing this ordering exists to prevent.
+        if (ticker != null) {
+            try {
+                ticker.stop();
+            } catch (Throwable t) {
+                warn("ElectricFurnace: failed to stop the machine ticker during shutdown ("
+                        + t.getClass().getName() + ": " + t.getMessage() + ").");
+            }
         }
-        // Returns every open viewer's inputs, fuel, and output directly. Must not be
+        // Persists every live machine's contents to its own block PDC directly. Must
+        // run BEFORE FurnaceGui.closeAll() and must not be replaced with anything that
+        // depends on event dispatch -- see the class note.
+        //
+        // The unloaded-chunk-including variant, deliberately: a machine retained by
+        // MachineStore#evictable can sit in an unloaded chunk with state its viewer
+        // changed after the unload flush, and there is no later flush to catch it. See
+        // MachineStore#flushAllIncludingUnloadedChunks.
+        if (store != null) {
+            try {
+                store.flushAllIncludingUnloadedChunks();
+            } catch (Throwable t) {
+                warn("ElectricFurnace: failed to flush machine states during shutdown ("
+                        + t.getClass().getName() + ": " + t.getMessage() + ").");
+            }
+        }
+        // Makes one more per-viewer attempt to sync and flush each open GUI's contents,
+        // falling back to returning items directly only if that fails. Must not be
         // replaced with anything that depends on event dispatch -- see the class note.
         try {
-            FurnaceGui.closeAll();
+            FurnaceGui.closeAll(store);
         } catch (Throwable t) {
             warn("ElectricFurnace: failed to close open furnace GUIs during shutdown ("
                     + t.getClass().getName() + ": " + t.getMessage() + ").");
+        }
+        // Stopped last: nothing above depends on effects still running, and stopping
+        // it earlier would buy nothing -- effects only ever read state, never mutate
+        // it, so it was never part of the item-safety ordering above.
+        if (effects != null) {
+            effects.stop();
         }
         MachineRecipe.unregister();
     }
@@ -176,9 +253,19 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
         return machines;
     }
 
+    /** The block-PDC-backed machine contents/run-state store, or {@code null} if it failed to wire. */
+    public MachineStore store() {
+        return store;
+    }
+
     /** The single global effects loop, or {@code null} if it failed to wire. */
     public MachineEffects effects() {
         return effects;
+    }
+
+    /** The single global machine ticker, or {@code null} if it failed to wire. */
+    public MachineTicker ticker() {
+        return ticker;
     }
 
     private void warn(String message) {

@@ -13,6 +13,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Cancellable;
 import org.bukkit.event.EventHandler;
@@ -24,19 +25,24 @@ import org.bukkit.event.block.BlockPistonExtendEvent;
 import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
 import org.xpfarm.electricfurnace.item.MachineItemFactory;
 import org.xpfarm.electricfurnace.item.MaterialContract;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
+import org.xpfarm.electricfurnace.machine.MachineState;
+import org.xpfarm.electricfurnace.machine.MachineStore;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
+import java.util.logging.Logger;
 
 /**
  * Registers/unregisters Electric Furnace blocks and opens the custom GUI in place of
@@ -47,26 +53,45 @@ import java.util.function.Supplier;
  *
  * <p><b>Breaking:</b> a registered machine drops the machine item (never a plain
  * blast furnace) and the vanilla drop is cancelled. Anyone currently viewing that
- * block's GUI is force-closed first -- {@link FurnaceGui#closeForBlock} synchronously
- * fires {@code InventoryCloseEvent}, so their items are already back in their
- * inventory (or dropped at their feet) before the block disappears underneath the
- * (now nonexistent) custom inventory.
+ * block's GUI is force-closed first -- {@link FurnaceGui#closeForBlock} returns their
+ * items directly (never relying on {@code InventoryCloseEvent} to do it) before the
+ * block disappears underneath the (now nonexistent) custom inventory. The machine's
+ * own persisted contents -- its inputs, fuel, and output, tracked separately by
+ * {@link MachineStore} from whatever a currently-open GUI was showing -- are then
+ * dropped on the ground and the store entry is forgotten, in that order: progress is
+ * forfeited, but no item is ever only in memory when the block stops existing.
  *
  * <p><b>Right-click:</b> the event is <em>always</em> cancelled for a registered
  * machine before anything else runs -- if the vanilla blast furnace GUI were also
  * allowed to open, a player could move items through it and bypass every guard in
  * {@link MachineGuiListener}. Only after cancelling do we check permission and open
  * the real GUI.
+ *
+ * <p><b>Hoppers, known limitation.</b> {@link #onInventoryMove} cancels every
+ * {@link InventoryMoveItemEvent} whose source or destination inventory belongs to a
+ * registered machine block. A {@code BLAST_FURNACE} still has its own vanilla
+ * 3-slot smelting inventory underneath, entirely separate from this plugin's custom
+ * GUI and from {@link MachineState}; a hopper feeding it (or pulling from it) would
+ * silently write items into that vanilla inventory, where they are never read,
+ * never displayed, and never persisted by {@link MachineStore} -- invisible and
+ * unreachable until the block is eventually broken and its (uninvolved) vanilla
+ * contents happen to spill out with it. Cancelling unconditionally is simpler and
+ * safer than trying to route hopper items into {@code MachineState} the way a
+ * player's click does; this is documented in {@code config.yml} as a known
+ * limitation, not exposed as a config toggle.
  */
 public final class MachineBlockListener implements Listener {
 
+    private static final Logger LOGGER = Logger.getLogger("ElectricFurnace");
     private static final String USE_PERMISSION = "electricfurnace.use";
 
     private final MachineRegistry machines;
+    private final MachineStore store;
     private final Supplier<EfConfig> configSupplier;
 
-    public MachineBlockListener(MachineRegistry machines, Supplier<EfConfig> configSupplier) {
+    public MachineBlockListener(MachineRegistry machines, MachineStore store, Supplier<EfConfig> configSupplier) {
         this.machines = Objects.requireNonNull(machines, "machines");
+        this.store = Objects.requireNonNull(store, "store");
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
     }
 
@@ -97,13 +122,56 @@ public final class MachineBlockListener implements Listener {
             return;
         }
 
-        // Return any open viewer's items BEFORE the block (and its virtual inventory)
-        // are gone -- never destroy items by breaking the block out from under an open GUI.
-        FurnaceGui.closeForBlock(block);
+        // Guarded like MachineStore#flushAll and MachineTicker#run: nothing in an
+        // event handler may throw, and an unwrapped throw here is worse than usual --
+        // it can land between dropStoreContents (items on the ground) and
+        // store.forget/machines.unregister/setDropItems(false)/the machine-item drop,
+        // leaving the block break, the vanilla drop suppression, or the registry entry
+        // out of sync with what was already dropped. Logging and returning at least
+        // stops the exception from propagating into Bukkit's own break-event handling.
+        try {
+            // Return any open viewer's items BEFORE the block (and its virtual
+            // inventory) are gone -- never destroy items by breaking the block out
+            // from under an open GUI.
+            FurnaceGui.closeForBlock(block, store);
 
-        machines.unregister(block);
-        event.setDropItems(false);
-        block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+            // The machine's own persisted contents -- separate from whatever a
+            // viewer's GUI held -- must hit the ground before the store forgets them
+            // and the block stops being addressable as a machine. Progress is
+            // forfeited; items never are.
+            dropStoreContents(block);
+            store.forget(block);
+
+            machines.unregister(block);
+            event.setDropItems(false);
+            block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+        } catch (Throwable t) {
+            LOGGER.warning("ElectricFurnace: failed to fully handle machine break at " + describe(block)
+                    + " (" + t.getClass().getName() + ": " + t.getMessage() + "); the block break may have "
+                    + "left the machine registry, its dropped contents, or the vanilla drop suppression "
+                    + "partially applied.");
+        }
+    }
+
+    /**
+     * Drops every non-null input, fuel, and output stack currently held in
+     * {@code block}'s {@link MachineStore} entry at the block's location. Called
+     * immediately before {@link MachineStore#forget}, so nothing this method skips is
+     * about to be flushed anywhere either.
+     */
+    private void dropStoreContents(Block block) {
+        MachineState state = store.get(block);
+        for (ItemStack input : state.inputs()) {
+            dropIfPresent(block, input);
+        }
+        dropIfPresent(block, state.fuel());
+        dropIfPresent(block, state.output());
+    }
+
+    private static void dropIfPresent(Block block, ItemStack stack) {
+        if (stack != null && stack.getType() != Material.AIR && stack.getAmount() > 0) {
+            block.getWorld().dropItemNaturally(block.getLocation(), stack);
+        }
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -124,8 +192,20 @@ public final class MachineBlockListener implements Listener {
      * still pointing at the now-empty location, and would drop -- subject to the
      * explosion's yield roll -- at best a plain blast furnace. Both are item loss.
      * Machines are pulled out of the block list so the explosion does not process them,
-     * then broken deliberately: viewers force-closed (returning their contents),
-     * registration removed, and the machine item dropped unconditionally.
+     * then broken deliberately: viewers force-closed (returning their contents), the
+     * store's own persisted contents dropped and forgotten, registration removed, and
+     * the machine item dropped unconditionally.
+     *
+     * <p><b>Per-machine try/catch is not optional here.</b> {@code blockList.removeAll}
+     * below already pulls every machine in {@code machineBlocks} out of the explosion
+     * before this method's own salvage loop runs. If that loop then threw partway
+     * through and aborted, every machine after the failing one would be left in the
+     * worst possible state: not exploded by vanilla (already removed from
+     * {@code blockList}), and not salvaged by this method either (the loop never
+     * reached it) -- its items would exist in zero places. Wrapping each machine's
+     * handling in its own guard, exactly like {@code MachineStore#flushAll} and
+     * {@code MachineTicker#run} guard their own per-machine loops, is what keeps one
+     * bad block from costing every other machine caught in the same explosion.
      */
     private void salvageExploded(List<Block> blockList) {
         List<Block> machineBlocks = new ArrayList<>();
@@ -140,10 +220,19 @@ public final class MachineBlockListener implements Listener {
         blockList.removeAll(machineBlocks);
 
         for (Block block : machineBlocks) {
-            FurnaceGui.closeForBlock(block);
-            machines.unregister(block);
-            block.setType(Material.AIR);
-            block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+            try {
+                FurnaceGui.closeForBlock(block, store);
+                dropStoreContents(block);
+                store.forget(block);
+                machines.unregister(block);
+                block.setType(Material.AIR);
+                block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+            } catch (Throwable t) {
+                LOGGER.warning("ElectricFurnace: failed to salvage exploded machine at " + describe(block)
+                        + " (" + t.getClass().getName() + ": " + t.getMessage() + "); it was already removed "
+                        + "from the explosion's block list and may now be left un-salvaged -- check this "
+                        + "location by hand.");
+            }
         }
     }
 
@@ -204,6 +293,63 @@ public final class MachineBlockListener implements Listener {
         }
 
         boolean powered = block.getBlockPower() > 0;
-        FurnaceGui.open(player, block, configSupplier.get(), powered);
+        FurnaceGui.open(player, block, configSupplier.get(), powered, store.get(block));
+    }
+
+    /**
+     * Cancels any hopper (or dropper/dispenser) transfer touching a registered
+     * machine's own vanilla block inventory, in either direction. See the class-level
+     * "Hoppers, known limitation" note for why this is unconditional rather than
+     * routed into {@link MachineState}.
+     *
+     * <p><b>Fails safe, not open.</b> {@code getHolder()} (reached through
+     * {@link #belongsToMachine}) can throw, and Bukkit's own handling of a throwing
+     * listener is to log it and move on -- which for an unwrapped handler here would
+     * leave the event exactly as it started: <em>not</em> cancelled. That is the
+     * dangerous direction to fail in: the transfer is then allowed, and items go into
+     * the machine's ignored vanilla {@code BLAST_FURNACE} inventory, where they are
+     * invisible and unreachable (see the class-level note). Wrapping the whole
+     * decision and defaulting to {@code setCancelled(true)} on any failure means the
+     * worst case is a hopper that stops working near this block, never one that
+     * silently swallows items into a dead inventory.
+     */
+    @EventHandler(ignoreCancelled = true)
+    public void onInventoryMove(InventoryMoveItemEvent event) {
+        try {
+            if (belongsToMachine(event.getSource()) || belongsToMachine(event.getDestination())) {
+                event.setCancelled(true);
+            }
+        } catch (Throwable t) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * Whether {@code inventory} belongs to a registered machine's own vanilla block
+     * inventory.
+     *
+     * <p>{@code blockState.getType() == Material.BLAST_FURNACE} is a cheap pre-gate
+     * checked <b>before</b> {@link MachineRegistry#isMachine}: a machine block is
+     * always a {@code BLAST_FURNACE} (see {@link org.xpfarm.electricfurnace.item.MachineItemFactory}),
+     * so this rejects essentially every hopper/dropper/dispenser transfer on the
+     * server for the cost of a field read, before {@code isMachine} -> {@code
+     * readCoords} gets anywhere near the chunk's {@code PersistentDataContainer}.
+     * {@link InventoryMoveItemEvent} fires per hopper per transfer attempt,
+     * server-wide, so this matters: without the pre-gate, every single one of those
+     * events -- for both its source and its destination inventory -- decodes a PDC
+     * string and allocates a {@code HashSet} on the hot path, for blocks that are
+     * essentially never a furnace at all. {@code isMachine} remains the authoritative
+     * check; this only short-circuits the overwhelmingly common case where it would
+     * have said "no" anyway.
+     */
+    private boolean belongsToMachine(Inventory inventory) {
+        return inventory != null
+                && inventory.getHolder() instanceof BlockState blockState
+                && blockState.getType() == Material.BLAST_FURNACE
+                && machines.isMachine(blockState.getBlock());
+    }
+
+    private static String describe(Block block) {
+        return block.getWorld().getName() + " " + block.getX() + "," + block.getY() + "," + block.getZ();
     }
 }

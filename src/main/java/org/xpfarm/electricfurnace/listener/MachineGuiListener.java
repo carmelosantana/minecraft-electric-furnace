@@ -9,23 +9,22 @@
  */
 package org.xpfarm.electricfurnace.listener;
 
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
-import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.plugin.Plugin;
-import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
 import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
 import org.xpfarm.electricfurnace.gui.GuiLayout;
+import org.xpfarm.electricfurnace.gui.SlotLock;
 import org.xpfarm.electricfurnace.item.MetalClassifier;
+import org.xpfarm.electricfurnace.machine.MachineState;
 
 import java.util.HashSet;
 import java.util.Objects;
@@ -33,8 +32,8 @@ import java.util.Set;
 import java.util.function.Supplier;
 
 /**
- * Guards every way an item can enter or leave an Electric Furnace GUI slot, and
- * returns items to the player whenever the GUI closes.
+ * Guards every way an item can enter or leave an Electric Furnace GUI slot, and keeps
+ * the machine's persisted state in sync with whatever a viewer does to it.
  *
  * <p><b>The slot guard.</b> Filler and the status indicator are never interactive --
  * any click on them is cancelled outright. The output slot may be taken from but
@@ -44,6 +43,13 @@ import java.util.function.Supplier;
  * <em>out</em> of the GUI, number-key hotbar swaps, and double-click collection, all
  * of which route through {@link InventoryClickEvent#getAction()}.
  *
+ * <p><b>The run lock.</b> On top of the slot guard, {@link SlotLock#allows} is
+ * consulted with {@code running = !state.isIdle()}: while a run is in progress, input
+ * slots reject both insertion and removal, and the fuel slot accepts insertion but not
+ * removal. {@link #shouldCancelForLock} and {@link #shouldCancelDragForLock} apply
+ * this the same way {@link #shouldCancel} applies the structural slot guard, so a
+ * click or drag is cancelled if either guard objects.
+ *
  * <p><b>Shift-click into the GUI is routed manually.</b> When a player shift-clicks an
  * item in their own inventory, Bukkit's {@code MOVE_TO_OTHER_INVENTORY} handling picks
  * the destination slot in the top inventory internally -- {@link
@@ -51,38 +57,36 @@ import java.util.function.Supplier;
  * inventory, not where the item lands -- and that algorithm will use the output slot if
  * it is the only empty top slot at the time. So Bukkit's move is always cancelled.
  * Rather than stop there, {@link #handleShiftClickIn} performs the move itself:
- * redstone to the fuel slot, recyclable items to the input slots, anything else
- * nowhere. This keeps shift-click working -- filling the inputs is one click instead
- * of five, which matters on Bedrock, a platform this plugin explicitly supports --
- * while making the destination something this class chooses explicitly and can
- * guarantee is never OUTPUT, INDICATOR, or FILLER.
+ * redstone to the fuel slot, recyclable items to the input slots (unless the run lock
+ * currently rejects insertion there), anything else nowhere.
  *
  * <p><b>Drags</b> ({@link InventoryDragEvent}) can span multiple slots, including
  * guarded ones, in a single event -- {@link #shouldCancelDrag} cancels the whole drag
  * if any touched top slot is FILLER, INDICATOR, or OUTPUT.
  *
- * <p><b>Never destroy items.</b> On {@link InventoryCloseEvent} -- for any reason,
- * including disconnect (Paper fires this event on player disconnect too) -- every
- * input, fuel, and output item is returned to the player via
- * {@link FurnaceGui#returnAllItems}, dropping at their feet if their inventory is
- * full.
+ * <p><b>Never destroy items.</b> A click or drag this class allows to proceed needs no
+ * follow-up at all. The GUI inventory <em>is</em> the machine's storage (see
+ * {@link MachineState}), so the item the player just moved is already exactly where the
+ * ticker and {@code MachineStateCodec} will look for it. Bukkit still finishes applying
+ * the move only after this handler returns -- but with one storage location that no
+ * longer matters, because there is no second copy waiting to be reconciled with it. The
+ * one-tick deferred sync this class used to schedule, and the pending-sync counter that
+ * existed to stop the ticker colliding with that deferral, are both gone with it.
+ *
+ * <p>A close likewise does nothing to the items: they belong to the
+ * machine and they stay in the machine (see {@link FurnaceGui#returnAllItems}'s narrower
+ * remaining callers). No close handler is needed, so there is none.
  */
 public final class MachineGuiListener implements Listener {
 
-    private final Plugin plugin;
     private final Supplier<EfConfig> configSupplier;
-    private final Supplier<AlloyRegistry> alloysSupplier;
 
     /**
-     * @param plugin         owning plugin instance, used only to schedule the
-     *                       post-click processing attempt on the next server tick
-     * @param configSupplier supplies the live, possibly-reloaded configuration
-     * @param alloysSupplier supplies the live, possibly-reloaded alloy registry
+     * @param configSupplier supplies the live, possibly-reloaded configuration, for the
+     *                       shift-click routing decision
      */
-    public MachineGuiListener(Plugin plugin, Supplier<EfConfig> configSupplier, Supplier<AlloyRegistry> alloysSupplier) {
-        this.plugin = Objects.requireNonNull(plugin, "plugin");
+    public MachineGuiListener(Supplier<EfConfig> configSupplier) {
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
-        this.alloysSupplier = Objects.requireNonNull(alloysSupplier, "alloysSupplier");
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -117,13 +121,16 @@ public final class MachineGuiListener implements Listener {
             return;
         }
 
-        if (shouldCancel(GuiLayout.roleOf(event.getSlot()), event.getAction())) {
+        GuiLayout.SlotRole role = GuiLayout.roleOf(event.getSlot());
+        if (shouldCancel(role, event.getAction())) {
             event.setCancelled(true);
             return;
         }
 
-        if (event.getWhoClicked() instanceof Player player) {
-            scheduleProcess(player, top);
+        ClickEffect effect = classify(event.getAction());
+        boolean running = isRunning(top);
+        if (shouldCancelForLock(role, effect, running)) {
+            event.setCancelled(true);
         }
     }
 
@@ -139,7 +146,8 @@ public final class MachineGuiListener implements Listener {
      * exhaustively-tested decision) and can only ever be the fuel slot or the input
      * slots -- {@link FurnaceGui#insertIntoFuel} and
      * {@link FurnaceGui#insertIntoInputs} address those slots by name and have no code
-     * path that can reach OUTPUT, INDICATOR, or FILLER.
+     * path that can reach OUTPUT, INDICATOR, or FILLER. The input slot additionally
+     * respects the run lock: while a run is in progress, nothing is routed there.
      *
      * <p>The moving stack is cloned before any insertion, so the slot's real item is
      * never aliased into the GUI; it is written back exactly once, with the remainder.
@@ -157,9 +165,11 @@ public final class MachineGuiListener implements Listener {
                 moving.getType() == Material.REDSTONE,
                 MetalClassifier.classify(moving, configSupplier.get().recycling()).isPresent());
 
+        boolean running = isRunning(top);
         int moved = switch (target) {
             case FUEL -> FurnaceGui.insertIntoFuel(top, moving);
-            case INPUT -> FurnaceGui.insertIntoInputs(top, moving);
+            case INPUT -> SlotLock.allows(GuiLayout.SlotRole.INPUT, SlotLock.Action.INSERT, running)
+                    ? FurnaceGui.insertIntoInputs(top, moving) : 0;
             case NONE -> 0;
         };
 
@@ -168,10 +178,6 @@ public final class MachineGuiListener implements Listener {
         }
 
         event.setCurrentItem(moving.getAmount() <= 0 ? null : moving);
-
-        if (event.getWhoClicked() instanceof Player player) {
-            scheduleProcess(player, top);
-        }
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -193,47 +199,21 @@ public final class MachineGuiListener implements Listener {
             return;
         }
 
-        if (event.getWhoClicked() instanceof Player player) {
-            scheduleProcess(player, top);
-        }
-    }
-
-    // No ignoreCancelled: InventoryCloseEvent is not Cancellable, so the flag would be
-    // meaningless here.
-    @EventHandler
-    public void onClose(InventoryCloseEvent event) {
-        Inventory top = event.getView().getTopInventory();
-        if (!FurnaceGui.isFurnaceGui(top)) {
-            return;
-        }
-        if (event.getPlayer() instanceof Player player) {
-            FurnaceGui.returnAllItems(top, player);
+        if (shouldCancelDragForLock(touchedTopRoles, isRunning(top))) {
+            event.setCancelled(true);
         }
     }
 
     /**
-     * Schedules one processing attempt for the next server tick -- a click's item
-     * movement is applied by the server only after this event handler returns, so
-     * reading slot contents synchronously here would see the pre-click state.
+     * Whether the machine backing {@code top} currently has a run in progress.
+     *
+     * <p>Read straight off the inventory's holder. {@code top} is the machine's own
+     * storage, so its {@link MachineState} is reachable without a {@link MachineStore}
+     * lookup -- and, more to the point, without any risk of consulting a <em>different</em>
+     * state object than the one whose slots this click is about to change.
      */
-    private void scheduleProcess(Player player, Inventory top) {
-        FurnaceGui.blockOf(top).ifPresent(block -> Bukkit.getScheduler().runTask(plugin, () -> {
-            // Guard on THIS machine's GUI still being open, not merely "some furnace
-            // GUI". Between the click and this tick the player may have closed this GUI
-            // and opened a different machine's; processing `top` then would run against
-            // an inventory they are no longer viewing, using the wrong block's power.
-            if (!player.isOnline()) {
-                return;
-            }
-            boolean sameGuiStillOpen = FurnaceGui.blockOf(player.getOpenInventory().getTopInventory())
-                    .filter(block::equals)
-                    .isPresent();
-            if (!sameGuiStillOpen) {
-                return;
-            }
-            boolean powered = block.getBlockPower() > 0;
-            FurnaceGui.tryProcess(top, configSupplier.get(), alloysSupplier.get(), powered);
-        }));
+    private boolean isRunning(Inventory top) {
+        return FurnaceGui.stateOf(top).map(state -> !state.isIdle()).orElse(false);
     }
 
     // =================================================================================
@@ -276,6 +256,9 @@ public final class MachineGuiListener implements Listener {
      *       taking is always allowed.</li>
      *   <li>INPUT, FUEL: never cancelled by this guard.</li>
      * </ul>
+     *
+     * <p>This is the structural guard only -- it knows nothing about whether a run is
+     * in progress. {@link #shouldCancelForLock} applies that separately.
      */
     static boolean shouldCancel(GuiLayout.SlotRole role, boolean isPlace, boolean isTake) {
         return switch (role) {
@@ -289,6 +272,22 @@ public final class MachineGuiListener implements Listener {
     static boolean shouldCancel(GuiLayout.SlotRole role, InventoryAction action) {
         ClickEffect effect = classify(action);
         return shouldCancel(role, effect.isPlace(), effect.isTake());
+    }
+
+    /**
+     * The run-lock guard: cancels a click that would insert into, or remove from, a
+     * slot {@link SlotLock#allows} currently forbids for that action. Composes with
+     * {@link #shouldCancel(GuiLayout.SlotRole, boolean, boolean)} by simple OR --
+     * FILLER/INDICATOR/OUTPUT are already fully handled by the structural guard, and
+     * {@link SlotLock#allows} agrees with it there regardless of {@code running}, so
+     * this only ever adds a cancellation for INPUT (both directions, while running)
+     * and FUEL (removal only, while running).
+     */
+    static boolean shouldCancelForLock(GuiLayout.SlotRole role, ClickEffect effect, boolean running) {
+        if (effect.isPlace() && !SlotLock.allows(role, SlotLock.Action.INSERT, running)) {
+            return true;
+        }
+        return effect.isTake() && !SlotLock.allows(role, SlotLock.Action.REMOVE, running);
     }
 
     /**
@@ -343,11 +342,28 @@ public final class MachineGuiListener implements Listener {
      * The drag guard: a single {@link InventoryDragEvent} can distribute the cursor
      * item across several slots in one action, including guarded ones. A drag always
      * places, so the whole event is cancelled if any touched top-inventory slot is
-     * FILLER, INDICATOR, or OUTPUT.
+     * FILLER, INDICATOR, or OUTPUT. As with {@link #shouldCancel(GuiLayout.SlotRole,
+     * boolean, boolean)}, this is the structural guard only.
      */
     static boolean shouldCancelDrag(Set<GuiLayout.SlotRole> touchedTopRoles) {
         return touchedTopRoles.contains(GuiLayout.SlotRole.FILLER)
                 || touchedTopRoles.contains(GuiLayout.SlotRole.INDICATOR)
                 || touchedTopRoles.contains(GuiLayout.SlotRole.OUTPUT);
+    }
+
+    /**
+     * The drag guard's run-lock counterpart: a drag always places, so it is cancelled
+     * if {@link SlotLock#allows} forbids insertion into any touched role for the
+     * current {@code running} state. Redundant with, and consistent with,
+     * {@link #shouldCancelDrag} for FILLER/INDICATOR/OUTPUT; the only case this adds is
+     * a drag touching an INPUT slot while a run is in progress.
+     */
+    static boolean shouldCancelDragForLock(Set<GuiLayout.SlotRole> touchedTopRoles, boolean running) {
+        for (GuiLayout.SlotRole role : touchedTopRoles) {
+            if (!SlotLock.allows(role, SlotLock.Action.INSERT, running)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

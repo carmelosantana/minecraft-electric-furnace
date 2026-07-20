@@ -6,7 +6,7 @@
 
     <groupId>org.xpfarm</groupId>
     <artifactId>electric-furnace</artifactId>
-    <version>0.1.2</version>
+    <version>0.2.0</version>
     <packaging>jar</packaging>
 
     <licenses>

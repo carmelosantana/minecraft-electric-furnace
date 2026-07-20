@@ -19,10 +19,11 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockRedstoneEvent;
 import org.bukkit.inventory.Inventory;
-import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
 import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
+import org.xpfarm.electricfurnace.machine.MachineState;
+import org.xpfarm.electricfurnace.machine.MachineStore;
 
 import java.util.List;
 import java.util.Objects;
@@ -37,8 +38,10 @@ import java.util.function.Supplier;
  * time (used by {@code MachineGuiListener} and {@code MachineBlockListener} too), so
  * there is no cached state that could ever drift out of sync with the world. This
  * class's job is purely reactive -- when a registered machine's redstone current
- * changes, update its status bulb and re-attempt processing for anyone currently
- * viewing its GUI, since the redstone change may be exactly what was blocking it.
+ * changes, update its status bulb and refresh the status indicator for anyone
+ * currently viewing its GUI, since the redstone change may be exactly what was
+ * blocking (or unblocking) it. Actually advancing a run belongs to {@code
+ * MachineTicker} now, not to this listener.
  */
 public final class RedstoneListener implements Listener {
 
@@ -52,14 +55,13 @@ public final class RedstoneListener implements Listener {
     };
 
     private final MachineRegistry machines;
+    private final MachineStore store;
     private final Supplier<EfConfig> configSupplier;
-    private final Supplier<AlloyRegistry> alloysSupplier;
 
-    public RedstoneListener(MachineRegistry machines, Supplier<EfConfig> configSupplier,
-            Supplier<AlloyRegistry> alloysSupplier) {
+    public RedstoneListener(MachineRegistry machines, MachineStore store, Supplier<EfConfig> configSupplier) {
         this.machines = Objects.requireNonNull(machines, "machines");
+        this.store = Objects.requireNonNull(store, "store");
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
-        this.alloysSupplier = Objects.requireNonNull(alloysSupplier, "alloysSupplier");
     }
 
     /**
@@ -71,9 +73,9 @@ public final class RedstoneListener implements Listener {
      * changed. A blast furnace is not a redstone-sensitive block, so it never fires this
      * event itself -- testing {@code machines.isMachine(event.getBlock())} could
      * therefore never be true, making the whole handler dead code: the copper bulb never
-     * lit and the "redstone changed, re-attempt processing" path never ran. The machine
-     * to act on is a <em>neighbour</em> of the event block, so all six neighbours are
-     * scanned (see {@link #neighbourOffsets}).
+     * lit and the status indicator never refreshed. The machine to act on is a
+     * <em>neighbour</em> of the event block, so all six neighbours are scanned (see
+     * {@link #neighbourOffsets}).
      */
     @EventHandler
     public void onRedstoneChange(BlockRedstoneEvent event) {
@@ -91,7 +93,7 @@ public final class RedstoneListener implements Listener {
             if (config.machine().statusBulbEnabled()) {
                 updateAdjacentBulb(machine, powered);
             }
-            reattemptProcessingForViewers(machine, config, powered);
+            refreshIndicatorForViewers(machine, config, powered);
         }
     }
 
@@ -148,12 +150,16 @@ public final class RedstoneListener implements Listener {
         }
     }
 
-    private void reattemptProcessingForViewers(Block block, EfConfig config, boolean powered) {
+    private void refreshIndicatorForViewers(Block block, EfConfig config, boolean powered) {
+        MachineState state = store.get(block);
+        boolean smelting = !state.isIdle();
+        int smeltTicks = config.machine().smeltTicks();
         for (Player player : Bukkit.getOnlinePlayers()) {
             Inventory top = player.getOpenInventory().getTopInventory();
             FurnaceGui.blockOf(top)
                     .filter(block::equals)
-                    .ifPresent(b -> FurnaceGui.tryProcess(top, config, alloysSupplier.get(), powered));
+                    .ifPresent(b -> FurnaceGui.refreshIndicator(
+                            top, config, powered, smelting, state.progressTicks(), smeltTicks));
         }
     }
 }

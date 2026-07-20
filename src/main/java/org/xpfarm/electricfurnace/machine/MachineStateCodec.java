@@ -1,0 +1,224 @@
+/*
+ * ElectricFurnace - a redstone-powered smelter that recycles metal gear into ingots.
+ * Copyright (C) 2026 Carmelo Santana
+ *
+ * This program is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU Affero General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option) any later version.
+ * See the LICENSE file at the project root for the full license text.
+ */
+package org.xpfarm.electricfurnace.machine;
+
+import org.bukkit.NamespacedKey;
+import org.bukkit.block.Block;
+import org.bukkit.inventory.ItemStack;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.ByteArrayInputStream;
+import java.util.logging.Logger;
+
+/**
+ * Encodes and decodes {@link MachineState} for the machine block's PDC.
+ *
+ * <p>The wire format is split from the {@code ItemStack} conversion on purpose. The
+ * {@link Frame} layer deals only in {@code byte[]} payloads and is fully unit-testable
+ * with no running server -- which matters, because a framing bug here silently destroys
+ * every item in every machine on the next restart. The {@code ItemStack} layer is a thin
+ * adapter over Paper's {@code serializeAsBytes}/{@code deserializeBytes}.
+ *
+ * <p><b>Never throws.</b> Malformed bytes decode to an empty machine and log a warning.
+ * Throwing here would propagate into a chunk-load path.
+ *
+ * <h2>Only the functional slots are persisted</h2>
+ *
+ * <p>A {@link MachineState}'s items live in a 27-slot Bukkit inventory, but only seven of
+ * those slots -- five inputs, fuel, output -- are machine contents. The rest hold
+ * {@code FurnaceGui}'s filler panes and its status indicator, which are decoration
+ * regenerated from scratch whenever the GUI is drawn.
+ *
+ * <p>This codec deliberately encodes <b>only the seven functional slots</b>, addressed
+ * by name through {@link MachineState}'s accessors rather than by walking the inventory.
+ * Encoding all 27 would give every machine on the server a dozen glass panes and a
+ * redstone torch in its persisted state, on disk, forever -- and would make those
+ * decorations real, recoverable items rather than pixels. The decoration is already
+ * unreachable to a player ({@code MachineGuiListener} cancels every click on a FILLER or
+ * INDICATOR slot outright, and cancels view-wide {@code COLLECT_TO_CURSOR} on top of
+ * that), but a persistence layer that mints a pane into the world the moment any one of
+ * those guards is bypassed would turn a click-guard bug into an item-duplication bug.
+ * Not writing them down at all removes that coupling entirely.
+ *
+ * <p>A useful consequence: the wire format is byte-for-byte what it was before the
+ * inventory backed this state, so no migration and no version bump is needed.
+ */
+public final class MachineStateCodec {
+
+    private static final Logger LOGGER = Logger.getLogger("ElectricFurnace");
+
+    /** PDC key on the machine block holding the encoded state. */
+    public static final NamespacedKey KEY = new NamespacedKey("electricfurnace", "machine_state");
+
+    private static final int FORMAT_VERSION = 1;
+
+    /**
+     * Upper bound on a single payload's declared length. A serialized {@code ItemStack} is
+     * realistically a few KB; 1 MiB is generous headroom while still bounding the damage a
+     * corrupted length header can do. Without this cap, {@code readPayload} would allocate
+     * straight from an untrusted 4-byte field -- up to ~2GB -- on every chunk load.
+     */
+    private static final int MAX_PAYLOAD_LENGTH = 1024 * 1024;
+
+    private MachineStateCodec() {
+    }
+
+    /** The server-independent view of a machine's persisted bytes. */
+    public record Frame(byte[][] inputs, byte[] fuel, byte[] output, int progressTicks, int burnTicksRemaining) {
+    }
+
+    /**
+     * Wire format, all big-endian:
+     * {@code version:int, progress:int, burn:int, inputCount:int,
+     *  then inputCount payloads, then fuel payload, then output payload}.
+     * Each payload is {@code length:int} followed by that many bytes; a length of
+     * {@code -1} means the slot is empty.
+     */
+    public static byte[] encodeFrame(Frame frame) {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(buffer)) {
+            out.writeInt(FORMAT_VERSION);
+            out.writeInt(frame.progressTicks());
+            out.writeInt(frame.burnTicksRemaining());
+            out.writeInt(frame.inputs().length);
+            for (byte[] input : frame.inputs()) {
+                writePayload(out, input);
+            }
+            writePayload(out, frame.fuel());
+            writePayload(out, frame.output());
+        } catch (IOException e) {
+            // ByteArrayOutputStream does not perform IO; unreachable in practice.
+            LOGGER.warning("ElectricFurnace: failed to encode machine state: " + e.getMessage());
+            return new byte[0];
+        }
+        return buffer.toByteArray();
+    }
+
+    /** Decodes {@code bytes}, yielding an empty frame for anything malformed. */
+    public static Frame decodeFrame(byte[] bytes) {
+        Frame empty = new Frame(new byte[MachineState.INPUT_COUNT][], null, null, 0, 0);
+        if (bytes == null || bytes.length == 0) {
+            return empty;
+        }
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes))) {
+            int version = in.readInt();
+            if (version != FORMAT_VERSION) {
+                LOGGER.warning("ElectricFurnace: machine state has unsupported format version "
+                        + version + "; treating the machine as empty.");
+                return empty;
+            }
+            int progress = in.readInt();
+            int burn = in.readInt();
+            int inputCount = in.readInt();
+            if (inputCount < 0 || inputCount > 64) {
+                return empty;
+            }
+            byte[][] inputs = new byte[MachineState.INPUT_COUNT][];
+            for (int i = 0; i < inputCount; i++) {
+                byte[] payload = readPayload(in);
+                if (i < inputs.length) {
+                    inputs[i] = payload;
+                }
+            }
+            byte[] fuel = readPayload(in);
+            byte[] output = readPayload(in);
+            return new Frame(inputs, fuel, output, Math.max(0, progress), Math.max(0, burn));
+        } catch (Throwable e) {
+            // Deliberately catches Throwable, not just IOException/RuntimeException: a
+            // corrupted length header (see MAX_PAYLOAD_LENGTH) or any other malformed input
+            // can trigger an OutOfMemoryError, which is an Error and would otherwise escape
+            // straight into the chunk-load path. Nothing in this method may throw.
+            LOGGER.warning("ElectricFurnace: machine state could not be decoded ("
+                    + e.getClass().getSimpleName() + "); treating the machine as empty.");
+            return empty;
+        }
+    }
+
+    private static void writePayload(DataOutputStream out, byte[] payload) throws IOException {
+        if (payload == null) {
+            out.writeInt(-1);
+            return;
+        }
+        out.writeInt(payload.length);
+        out.write(payload);
+    }
+
+    private static byte[] readPayload(DataInputStream in) throws IOException {
+        int length = in.readInt();
+        if (length < 0) {
+            return null;
+        }
+        if (length > MAX_PAYLOAD_LENGTH) {
+            // Untrusted length header from the PDC; treat it as malformed input rather than
+            // allocating on the caller's say-so. The catch in decodeFrame turns this into an
+            // empty machine.
+            throw new IOException("payload length " + length + " exceeds cap of "
+                    + MAX_PAYLOAD_LENGTH + " bytes");
+        }
+        byte[] payload = new byte[length];
+        in.readFully(payload);
+        return payload;
+    }
+
+    // ---- ItemStack adapter (needs a running server; not unit-tested) ----------------
+
+    /**
+     * Encodes a live state for storage in a block PDC. Reads only the seven functional
+     * slots -- see the class note on why the inventory's decoration is not persisted.
+     */
+    public static byte[] encode(MachineState state) {
+        ItemStack[] contents = state.inputs();
+        byte[][] inputs = new byte[MachineState.INPUT_COUNT][];
+        for (int i = 0; i < inputs.length; i++) {
+            inputs[i] = toBytes(contents[i]);
+        }
+        return encodeFrame(new Frame(inputs, toBytes(state.fuel()), toBytes(state.output()),
+                state.progressTicks(), state.burnTicksRemaining()));
+    }
+
+    /**
+     * Decodes bytes read from {@code block}'s PDC into a live state.
+     *
+     * <p>{@code block} is required because a {@link MachineState}'s storage <em>is</em> a
+     * Bukkit inventory bound to that block: decoding is what first populates it.
+     */
+    public static MachineState decode(Block block, byte[] bytes) {
+        Frame frame = decodeFrame(bytes);
+        MachineState state = MachineState.empty(block);
+        for (int i = 0; i < MachineState.INPUT_COUNT; i++) {
+            state.setInput(i, fromBytes(frame.inputs()[i]));
+        }
+        state.setFuel(fromBytes(frame.fuel()));
+        state.setOutput(fromBytes(frame.output()));
+        state.setProgressTicks(frame.progressTicks());
+        state.setBurnTicksRemaining(frame.burnTicksRemaining());
+        return state;
+    }
+
+    private static byte[] toBytes(ItemStack stack) {
+        return stack == null ? null : stack.serializeAsBytes();
+    }
+
+    private static ItemStack fromBytes(byte[] bytes) {
+        if (bytes == null) {
+            return null;
+        }
+        try {
+            return ItemStack.deserializeBytes(bytes);
+        } catch (RuntimeException e) {
+            LOGGER.warning("ElectricFurnace: dropping an unreadable item from a machine slot ("
+                    + e.getClass().getSimpleName() + ").");
+            return null;
+        }
+    }
+}
