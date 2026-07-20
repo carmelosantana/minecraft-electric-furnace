@@ -23,7 +23,6 @@ import org.bukkit.event.world.WorldSaveEvent;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
-import org.xpfarm.electricfurnace.gui.FurnaceGui;
 
 import java.util.Collections;
 import java.util.Map;
@@ -155,7 +154,7 @@ public final class MachineStore implements Listener {
      * The live state for {@code block}, hydrating it from the block's PDC on first
      * access. Never {@code null}: a block that is not (or is no longer) a
      * {@link TileState}, or that has never been written to, yields
-     * {@link MachineState#empty()}.
+     * {@link MachineState#empty(Block)}.
      */
     public MachineState get(Block block) {
         Objects.requireNonNull(block, "block");
@@ -164,12 +163,12 @@ public final class MachineStore implements Listener {
 
     private MachineState hydrate(Block block) {
         if (!(block.getState() instanceof TileState tile)) {
-            return MachineState.empty();
+            return MachineState.empty(block);
         }
         try {
             PersistentDataContainer pdc = tile.getPersistentDataContainer();
             byte[] bytes = pdc.get(MachineStateCodec.KEY, PersistentDataType.BYTE_ARRAY);
-            return MachineStateCodec.decode(bytes);
+            return MachineStateCodec.decode(block, bytes);
         } catch (RuntimeException e) {
             // Mirrors MachineRegistry's defensive stance on chunk PDC reads: a value
             // written under this key by something other than MachineStateCodec must
@@ -177,7 +176,7 @@ public final class MachineStore implements Listener {
             // path.
             warn("failed to hydrate machine state at " + describe(block) + " ("
                     + e.getClass().getSimpleName() + ": " + e.getMessage() + "); treating it as empty.");
-            return MachineState.empty();
+            return MachineState.empty(block);
         }
     }
 
@@ -186,21 +185,16 @@ public final class MachineStore implements Listener {
      * no-op for a block that was never {@link #get(Block) accessed} and for a block
      * that is not a {@link TileState}.
      *
-     * <h3>Closing the deferred-sync window</h3>
+     * <h3>There is no open-GUI window to close any more</h3>
      *
-     * <p>{@code MachineGuiListener} folds a click's item movement into a machine's
-     * {@link MachineState} one tick <em>after</em> the click. A {@link WorldSaveEvent} or
-     * {@link ChunkUnloadEvent} landing inside that window would flush state one edit
-     * behind the open GUI: an item just placed into an input slot (already gone from the
-     * player's inventory) could exist nowhere, and an item just taken from the output
-     * slot could exist both in the player's inventory and, stale, in this flush. So
-     * before encoding, this method folds any currently-open GUI for {@code block} into
-     * {@code state} (see {@link FurnaceGui#findOpenInventory}/
-     * {@link FurnaceGui#syncToState}).
-     *
-     * <p>That sync is best-effort: a failure is logged and does not stop the (possibly
-     * one-tick-stale, but still valid) in-memory state from reaching disk. This method
-     * runs on the chunk-unload path and must stay fail-soft and non-throwing.
+     * <p>This method used to reach into {@code FurnaceGui}, find any currently-open GUI
+     * for {@code block}, and fold it into {@code state} before encoding -- because a
+     * click's effect reached the GUI inventory a tick before it reached
+     * {@link MachineState}, and a {@link WorldSaveEvent} or {@link ChunkUnloadEvent}
+     * landing in between would have persisted state one edit behind what the player could
+     * see. That is gone, along with the dependency on the view package that came with it:
+     * a machine's items live in exactly one inventory, which is what the player clicked
+     * and what {@link MachineStateCodec} reads here. A flush can no longer be stale.
      */
     public void flush(Block block) {
         Objects.requireNonNull(block, "block");
@@ -218,12 +212,6 @@ public final class MachineStore implements Listener {
             warn("cannot flush machine state at " + describe(block) + ": block is no longer a TileState "
                     + "(now " + block.getType() + "); its in-memory contents could not be persisted.");
             return;
-        }
-        try {
-            FurnaceGui.findOpenInventory(block).ifPresent(inventory -> FurnaceGui.syncToState(inventory, state));
-        } catch (Throwable t) {
-            warn("failed to sync an open GUI into machine state before flushing at " + describe(block) + " ("
-                    + t.getClass().getName() + ": " + t.getMessage() + "); flushing the last known state instead.");
         }
         PersistentDataContainer pdc = tile.getPersistentDataContainer();
         pdc.set(MachineStateCodec.KEY, PersistentDataType.BYTE_ARRAY, MachineStateCodec.encode(state));
@@ -326,9 +314,26 @@ public final class MachineStore implements Listener {
     }
 
     /**
-     * Flushes every machine {@link MachineRegistry#machinesIn} the unloading chunk,
-     * then drops each from the live map -- the chunk (and the block state it backs)
-     * is about to stop being addressable until it loads again.
+     * Flushes every machine {@link MachineRegistry#machinesIn} the unloading chunk, then
+     * drops each from the live map -- the chunk (and the block state it backs) is about
+     * to stop being addressable until it loads again.
+     *
+     * <h3>A machine somebody is still looking at is not evicted</h3>
+     *
+     * <p>{@link #evictable} is the guard, and it exists because a machine's items now
+     * live in the inventory its viewers have open. Evicting a viewed machine would let
+     * the next {@link #get} hydrate a <em>second</em> {@link MachineState}, with a second
+     * inventory, from the PDC this method just wrote -- while the viewer carried on
+     * editing the first one. Every item in that machine would then exist twice: once in
+     * the orphaned inventory the player can still take from, and once in the state
+     * everything else now uses. Keeping a viewed machine live keeps it a single object.
+     *
+     * <p>The machine simply stays in the map until a later unload finds it unviewed;
+     * {@link MachineTicker} already declines to advance a machine whose chunk is not
+     * loaded, so a retained entry costs a map slot and nothing else. This is close to
+     * unreachable in practice -- a player with a GUI open is standing next to the block,
+     * holding its chunk loaded -- which is exactly why it is worth guarding rather than
+     * arguing about.
      */
     @EventHandler(priority = EventPriority.MONITOR)
     public void onChunkUnload(ChunkUnloadEvent event) {
@@ -340,8 +345,32 @@ public final class MachineStore implements Listener {
                         + t.getClass().getName() + ": " + t.getMessage() + "); this machine's most "
                         + "recent in-memory progress may be lost, but the rest of the chunk is unaffected.");
             } finally {
-                live.remove(block);
+                if (evictable(block)) {
+                    live.remove(block);
+                }
             }
+        }
+    }
+
+    /**
+     * Whether {@code block}'s machine can safely leave the live map: it has no state, or
+     * its inventory has no viewers. See {@link #onChunkUnload}.
+     *
+     * <p>Never throws, and fails <em>closed</em> (keeping the machine live): a failure to
+     * establish that nobody is watching must not be read as "nobody is watching."
+     */
+    private boolean evictable(Block block) {
+        MachineState state = live.get(block);
+        if (state == null) {
+            return true;
+        }
+        try {
+            return state.getInventory().getViewers().isEmpty();
+        } catch (Throwable t) {
+            warn("could not determine whether anyone is viewing the machine at " + describe(block)
+                    + " (" + t.getClass().getName() + ": " + t.getMessage() + "); keeping it in memory "
+                    + "rather than risk splitting its contents across two inventories.");
+            return false;
         }
     }
 
