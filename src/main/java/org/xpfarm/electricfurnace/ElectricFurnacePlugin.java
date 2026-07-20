@@ -180,9 +180,14 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
         // Persists every live machine's contents to its own block PDC directly. Must
         // run BEFORE FurnaceGui.closeAll() and must not be replaced with anything that
         // depends on event dispatch -- see the class note.
+        //
+        // The unloaded-chunk-including variant, deliberately: a machine retained by
+        // MachineStore#evictable can sit in an unloaded chunk with state its viewer
+        // changed after the unload flush, and there is no later flush to catch it. See
+        // MachineStore#flushAllIncludingUnloadedChunks.
         if (store != null) {
             try {
-                store.flushAll();
+                store.flushAllIncludingUnloadedChunks();
             } catch (Throwable t) {
                 warn("ElectricFurnace: failed to flush machine states during shutdown ("
                         + t.getClass().getName() + ": " + t.getMessage() + ").");

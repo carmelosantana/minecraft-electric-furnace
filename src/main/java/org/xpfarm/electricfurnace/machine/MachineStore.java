@@ -62,9 +62,12 @@ import java.util.concurrent.ConcurrentHashMap;
  *       registry query to stay chunk-accurate without ever scanning a world.</li>
  *   <li><b>World save.</b> {@link #onWorldSave} calls {@link #flushAll()} so a machine
  *       that never unloads (a player parked nearby) still reaches disk on every
- *       autosave, not only on a clean shutdown.</li>
+ *       autosave, not only on a clean shutdown. It skips machines whose chunk is not
+ *       loaded rather than force-loading one, exactly as {@code MachineTicker} does.</li>
  *   <li><b>Plugin shutdown.</b> {@code ElectricFurnacePlugin#onDisable} calls
- *       {@link #flushAll()} directly -- <em>before</em> {@code FurnaceGui.closeAll()}.
+ *       {@link #flushAllIncludingUnloadedChunks()} directly -- <em>before</em>
+ *       {@code FurnaceGui.closeAll()}. It is the variant that <em>does</em> force-load,
+ *       because at shutdown a skip is not a deferral but permanent loss.
  *       By the time {@code onDisable} runs, {@code isEnabled} is already {@code false}
  *       and Bukkit's {@code SimplePluginManager} skips event dispatch to a disabled
  *       plugin, so nothing that depends on an event ever fires here. {@code flushAll}
@@ -220,18 +223,70 @@ public final class MachineStore implements Listener {
     }
 
     /**
-     * Flushes every currently live machine. Each machine's flush is independently
-     * guarded, so one bad block cannot prevent the rest from reaching disk.
+     * Flushes every currently live machine <em>whose chunk is loaded</em>. Each machine's
+     * flush is independently guarded, so one bad block cannot prevent the rest from
+     * reaching disk.
+     *
+     * <p>For the routine paths only -- world save. Shutdown must use
+     * {@link #flushAllIncludingUnloadedChunks()}; see there for why.
      */
     public void flushAll() {
+        flushAll(false);
+    }
+
+    /**
+     * Flushes every currently live machine, loading a chunk if that is what it takes.
+     * <b>For {@code onDisable} only.</b>
+     *
+     * <p>A machine can be live while its chunk is not loaded: {@link #evictable} retains
+     * a machine somebody still has open, and that machine's chunk may then unload out
+     * from under it. {@link #onChunkUnload} flushed it on the way past, but the viewer it
+     * was retained for can go on clicking the shared inventory afterwards -- that is the
+     * entire reason it was retained -- so <b>a retained, unloaded machine can hold state
+     * that has never reached disk.</b>
+     *
+     * <p>Skipping it here would therefore be silent item loss, not a deferral: at
+     * shutdown there is no later flush. So the shutdown path pays the synchronous chunk
+     * load. The routine caller ({@link #onWorldSave}) does not, because for it skipping
+     * really is a deferral -- the machine is flushed again on the next autosave, at
+     * unload, or at shutdown.
+     */
+    public void flushAllIncludingUnloadedChunks() {
+        flushAll(true);
+    }
+
+    private void flushAll(boolean loadChunksIfNeeded) {
         for (Block block : live.keySet()) {
             try {
+                if (!loadChunksIfNeeded && !isChunkLoaded(block)) {
+                    // Never force-load a chunk just to persist a machine -- the same
+                    // discipline MachineTicker#tickOne applies for the same reason: a
+                    // synchronous chunk load on the main thread is a server-wide stall,
+                    // and a routine flush is not worth one. Nothing is lost; this machine
+                    // was already flushed when its chunk unloaded, and is flushed again
+                    // on the next autosave or at shutdown.
+                    continue;
+                }
                 flush(block);
             } catch (Throwable t) {
                 warn("failed to flush machine state at " + describe(block) + " ("
                         + t.getClass().getName() + ": " + t.getMessage() + "); its in-memory state "
                         + "is unchanged, but this flush did not reach disk.");
             }
+        }
+    }
+
+    /**
+     * Whether {@code block}'s chunk is resident. Mirrors {@code MachineTicker}'s check
+     * exactly. Never throws: an unanswerable question is answered "loaded", so the caller
+     * falls through to {@link #flush}, whose own guard reports a block that cannot be
+     * persisted -- failing towards attempting the write rather than towards skipping it.
+     */
+    private boolean isChunkLoaded(Block block) {
+        try {
+            return block.getWorld().isChunkLoaded(block.getX() >> 4, block.getZ() >> 4);
+        } catch (Throwable t) {
+            return true;
         }
     }
 
