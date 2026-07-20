@@ -45,14 +45,20 @@ public record EfConfig(MachineSettings machine, EffectSettings effects, Recyclin
     public static EfConfig load(ConfigurationSection root, Consumer<String> warn) {
         MachineSettings machine = new MachineSettings(
                 ConfigValidator.parseDouble("machine.smelt-speed-multiplier",
-                        get(root, "machine.smelt-speed-multiplier"), 1.0, 10.0, 2.0, warn),
-                ConfigValidator.parseInt("machine.fuel-per-operation",
-                        get(root, "machine.fuel-per-operation"), 1, 64, 1, warn),
+                        get(root, "machine.smelt-speed-multiplier"), 1.0, 10.0, 2.5, warn),
+                ConfigValidator.parseInt("machine.burn-ticks-per-redstone",
+                        get(root, "machine.burn-ticks-per-redstone"), 20, 6000, 200, warn),
                 ConfigValidator.parseBoolean("machine.require-redstone-signal",
                         get(root, "machine.require-redstone-signal"), true, warn),
                 ConfigValidator.parseBoolean("machine.status-bulb.enabled",
                         get(root, "machine.status-bulb.enabled"), true, warn)
         );
+
+        if (get(root, "machine.fuel-per-operation") != null) {
+            warn.accept("machine.fuel-per-operation was removed in this version; redstone is now"
+                    + " consumed as burn time. Use machine.burn-ticks-per-redstone instead."
+                    + " The old key is being ignored.");
+        }
 
         EffectSettings effects = new EffectSettings(
                 ConfigValidator.parseBoolean("effects.enabled",

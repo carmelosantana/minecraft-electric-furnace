@@ -12,12 +12,15 @@
 # plugin from starting.
 
 machine:
-  # Multiplier applied to the base smelt speed. Valid range: 1.0-10.0.
-  smelt-speed-multiplier: 2.0
-  # Redstone dust consumed per completed operation. Valid range: 1-64.
-  fuel-per-operation: 1
-  # Whether the machine requires a redstone signal to run at all. The signal is
-  # the on/off switch; redstone dust is the fuel. See status-bulb below.
+  # Multiplier applied to the vanilla 200-tick smelt duration. 2.5 means one item
+  # smelts in 80 ticks (4 seconds). Valid range: 1.0-10.0.
+  smelt-speed-multiplier: 2.5
+  # Ticks of burn time bought by one redstone dust. Burn time is spent only while a
+  # smelt is actively advancing -- a powered machine with nothing to do does not eat
+  # your dust. At the defaults, one dust smelts 2.5 items. Valid range: 20-6000.
+  burn-ticks-per-redstone: 200
+  # Whether the machine requires a redstone signal to run at all. The signal is the
+  # on/off switch; redstone dust is the fuel. See status-bulb below.
   require-redstone-signal: true
   status-bulb:
     # Whether an adjacent COPPER_BULB is driven (via CopperBulb#setLit) to reflect

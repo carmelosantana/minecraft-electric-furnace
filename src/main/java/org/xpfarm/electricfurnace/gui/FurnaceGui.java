@@ -77,7 +77,7 @@ public final class FurnaceGui {
         RUNNING,
         /** {@code machine.require-redstone-signal} is {@code true} and the machine is not currently powered. */
         NO_SIGNAL,
-        /** Powered (or signal not required), but the fuel slot lacks enough redstone. */
+        /** Powered (or signal not required), but the fuel slot holds no redstone. */
         NO_FUEL
     }
 
@@ -186,14 +186,15 @@ public final class FurnaceGui {
         Objects.requireNonNull(inventory, "inventory");
         Objects.requireNonNull(config, "config");
 
-        boolean hasFuel = hasSufficientFuel(inventory, config.machine().fuelPerOperation());
+        boolean hasFuel = hasFuel(inventory);
         IndicatorState state = indicatorStateOf(powered, config.machine().requireRedstoneSignal(), hasFuel);
         inventory.setItem(GuiLayout.INDICATOR_SLOT, indicatorItem(state));
     }
 
-    private static boolean hasSufficientFuel(Inventory inventory, int fuelPerOperation) {
+    /** Whether the fuel slot holds redstone at all. One dust buys burn time; there is no per-operation quantity. */
+    private static boolean hasFuel(Inventory inventory) {
         ItemStack fuel = inventory.getItem(GuiLayout.FUEL_SLOT);
-        return fuel != null && fuel.getType() == Material.REDSTONE && fuel.getAmount() >= fuelPerOperation;
+        return fuel != null && fuel.getType() == Material.REDSTONE && fuel.getAmount() > 0;
     }
 
     /**
@@ -217,7 +218,7 @@ public final class FurnaceGui {
             return false;
         }
 
-        boolean hasFuel = hasSufficientFuel(inventory, config.machine().fuelPerOperation());
+        boolean hasFuel = hasFuel(inventory);
         ItemStack candidateOutput = candidateItemFor(result, alloys);
         if (candidateOutput == null) {
             // Unknown alloy id (already logged) -- treat exactly like a rejected run:
@@ -231,7 +232,7 @@ public final class FurnaceGui {
             return false;
         }
 
-        consumeFuel(inventory, config.machine().fuelPerOperation());
+        consumeFuel(inventory);
         depositOutput(inventory, currentOutput, candidateOutput);
         consumeOneFromEachOccupiedInputSlot(inventory);
 
@@ -252,9 +253,16 @@ public final class FurnaceGui {
         return inputs;
     }
 
-    private static void consumeFuel(Inventory inventory, int fuelPerOperation) {
+    /**
+     * Consumes exactly one redstone dust from the fuel slot. Under the burn-time model
+     * (see {@link #hasFuel}) there is no per-operation quantity to read from config --
+     * one dust is spent here; how many burn ticks that buys, and how those ticks are
+     * spent over time, is the concern of the continuous-operation ticking logic added
+     * in a later task.
+     */
+    private static void consumeFuel(Inventory inventory) {
         ItemStack fuel = inventory.getItem(GuiLayout.FUEL_SLOT);
-        int remaining = fuel.getAmount() - fuelPerOperation;
+        int remaining = fuel.getAmount() - 1;
         if (remaining <= 0) {
             inventory.setItem(GuiLayout.FUEL_SLOT, null);
         } else {

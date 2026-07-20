@@ -70,7 +70,7 @@ class ConfigValidatorTest {
     @Test
     void clampDouble_inRange_passesThroughUnchanged() {
         double result = ConfigValidator.clampDouble(
-                "machine.smelt-speed-multiplier", 4.5, 1.0, 10.0, 2.0, this::warn);
+                "machine.smelt-speed-multiplier", 4.5, 1.0, 10.0, 2.5, this::warn);
 
         assertEquals(4.5, result);
         assertTrue(warnings.isEmpty());
@@ -79,21 +79,21 @@ class ConfigValidatorTest {
     @Test
     void clampDouble_belowMin_fallsBackAndWarns() {
         double result = ConfigValidator.clampDouble(
-                "machine.smelt-speed-multiplier", 0.5, 1.0, 10.0, 2.0, this::warn);
+                "machine.smelt-speed-multiplier", 0.5, 1.0, 10.0, 2.5, this::warn);
 
-        assertEquals(2.0, result);
+        assertEquals(2.5, result);
         assertEquals(1, warnings.size());
-        assertWarningNames(warnings.get(0), "machine.smelt-speed-multiplier", "0.5", "2.0");
+        assertWarningNames(warnings.get(0), "machine.smelt-speed-multiplier", "0.5", "2.5");
     }
 
     @Test
     void clampDouble_aboveMax_fallsBackAndWarns() {
         double result = ConfigValidator.clampDouble(
-                "machine.smelt-speed-multiplier", 99.9, 1.0, 10.0, 2.0, this::warn);
+                "machine.smelt-speed-multiplier", 99.9, 1.0, 10.0, 2.5, this::warn);
 
-        assertEquals(2.0, result);
+        assertEquals(2.5, result);
         assertEquals(1, warnings.size());
-        assertWarningNames(warnings.get(0), "machine.smelt-speed-multiplier", "99.9", "2.0");
+        assertWarningNames(warnings.get(0), "machine.smelt-speed-multiplier", "99.9", "2.5");
     }
 
     // ---- parseInt (raw config Object -> validated int) ------------------------------
@@ -145,26 +145,26 @@ class ConfigValidatorTest {
     @Test
     void parseDouble_missingKey_fallsBackSilently() {
         double result = ConfigValidator.parseDouble(
-                "machine.smelt-speed-multiplier", null, 1.0, 10.0, 2.0, this::warn);
+                "machine.smelt-speed-multiplier", null, 1.0, 10.0, 2.5, this::warn);
 
-        assertEquals(2.0, result);
+        assertEquals(2.5, result);
         assertTrue(warnings.isEmpty());
     }
 
     @Test
     void parseDouble_wrongType_fallsBackAndWarns() {
         double result = ConfigValidator.parseDouble(
-                "machine.smelt-speed-multiplier", "fast", 1.0, 10.0, 2.0, this::warn);
+                "machine.smelt-speed-multiplier", "fast", 1.0, 10.0, 2.5, this::warn);
 
-        assertEquals(2.0, result);
+        assertEquals(2.5, result);
         assertEquals(1, warnings.size());
-        assertWarningNames(warnings.get(0), "machine.smelt-speed-multiplier", "fast", "2.0");
+        assertWarningNames(warnings.get(0), "machine.smelt-speed-multiplier", "fast", "2.5");
     }
 
     @Test
     void parseDouble_integerYamlValue_isAcceptedAsDouble() {
         double result = ConfigValidator.parseDouble(
-                "machine.smelt-speed-multiplier", 3, 1.0, 10.0, 2.0, this::warn);
+                "machine.smelt-speed-multiplier", 3, 1.0, 10.0, 2.5, this::warn);
 
         assertEquals(3.0, result);
         assertTrue(warnings.isEmpty());
