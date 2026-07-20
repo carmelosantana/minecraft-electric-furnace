@@ -9,11 +9,15 @@
  */
 package org.xpfarm.electricfurnace.machine;
 
+import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
+import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.TileState;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
 import org.bukkit.event.world.WorldSaveEvent;
 import org.bukkit.persistence.PersistentDataContainer;
@@ -69,6 +73,33 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li><b>Block break.</b> {@code MachineBlockListener} drops the machine's live
  *       contents at the block and calls {@link #forget(Block)} -- there is nothing to
  *       flush, because the block (and its PDC) is about to stop being a machine.</li>
+ * </ul>
+ *
+ * <h2>Every path a machine can (re-)enter memory</h2>
+ *
+ * <p>A machine leaving memory above does not mean its run stops -- its contents and
+ * run state are on disk in the block's own PDC, and {@link MachineTicker} only ever
+ * ticks what is in this store's {@link #live} map. A machine's PDC being correct is
+ * therefore not enough by itself; something must also call {@link #get} to bring it
+ * back into that map, or it silently sits idle forever even though its persisted
+ * state says it should be smelting.
+ *
+ * <ul>
+ *   <li><b>Chunk load.</b> {@link #onChunkLoad} hydrates every machine
+ *       {@link MachineRegistry#machinesIn} the newly-loaded chunk, one at a time, so a
+ *       machine mid-run when its chunk unloaded resumes ticking the moment the chunk
+ *       loads again -- without waiting for a GUI open, a redstone change, or
+ *       {@code MachineEffects}'s nearby-player-gated read to happen to touch it
+ *       first.</li>
+ *   <li><b>Plugin enable.</b> {@code ElectricFurnacePlugin#onEnable} calls
+ *       {@link #hydrateLoadedChunks()} once, directly, mirroring
+ *       {@code MachineEffects#seedLoadedChunks}. {@link #onChunkLoad} alone only
+ *       covers chunks that load <em>after</em> this listener is registered; every
+ *       chunk already resident in memory when the plugin enables -- the common case on
+ *       a server restart, since a chunk a machine sits in is usually already loaded by
+ *       the time plugins finish enabling -- would otherwise never hydrate at all. This
+ *       is the fix for the walk-away case this store exists to serve: load the
+ *       machine, leave, come back to find it still running.</li>
  * </ul>
  *
  * <h2>One bad machine must not cost every other machine in its chunk</h2>
@@ -181,6 +212,14 @@ public final class MachineStore implements Listener {
             return;
         }
         if (!(block.getState() instanceof TileState tile)) {
+            // Another plugin (or a world edit) replaced the block while it was still
+            // registered as a machine. The in-memory state has nowhere to go -- this is
+            // silent item loss unless it is at least logged, since nothing else observes
+            // this path. See the class-level "one line that decides whether this class
+            // works at all" note: a lost write here is exactly as invisible as a missed
+            // TileState#update call, just from the opposite direction.
+            warn("cannot flush machine state at " + describe(block) + ": block is no longer a TileState "
+                    + "(now " + block.getType() + "); its in-memory contents could not be persisted.");
             return;
         }
         try {
@@ -234,6 +273,59 @@ public final class MachineStore implements Listener {
     /** An unmodifiable view of every currently live machine, for the ticker. */
     public Map<Block, MachineState> liveStates() {
         return Collections.unmodifiableMap(live);
+    }
+
+    /**
+     * Hydrates every machine {@link MachineRegistry#machinesIn} the newly-loaded
+     * chunk, so a machine mid-run resumes ticking the instant its chunk is available
+     * again -- see the class-level "Every path a machine can (re-)enter memory" note.
+     * Each machine's hydration is independently guarded, mirroring
+     * {@link #onChunkUnload}: one corrupt block must not stop the rest of the chunk's
+     * machines from coming back to life.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onChunkLoad(ChunkLoadEvent event) {
+        hydrateChunk(event.getChunk());
+    }
+
+    /**
+     * Hydrates every registered machine in every already-loaded chunk, across every
+     * world. Called once from {@code ElectricFurnacePlugin#onEnable}, mirroring
+     * {@code MachineEffects#seedLoadedChunks} -- {@link #onChunkLoad} only covers
+     * chunks that load <em>after</em> this listener is registered, so without this a
+     * chunk already resident in memory at plugin enable (the common case on a server
+     * restart) would never hydrate at all. Never throws: a failure walking one world
+     * or one chunk must not stop the rest from being seeded.
+     */
+    public void hydrateLoadedChunks() {
+        try {
+            for (World world : Bukkit.getWorlds()) {
+                for (Chunk chunk : world.getLoadedChunks()) {
+                    hydrateChunk(chunk);
+                }
+            }
+        } catch (Throwable t) {
+            warn("failed to hydrate already-loaded chunks at startup (" + t.getClass().getName() + ": "
+                    + t.getMessage() + "); machines in those chunks will not resume until something else "
+                    + "touches them (a GUI open, a redstone change, or their chunk unloading and reloading).");
+        }
+    }
+
+    /**
+     * Hydrates every machine {@link MachineRegistry#machinesIn} one chunk, guarding
+     * each individually. Shared by {@link #onChunkLoad} and
+     * {@link #hydrateLoadedChunks()} so both paths hydrate exactly the same way.
+     */
+    private void hydrateChunk(Chunk chunk) {
+        for (Block block : machines.machinesIn(chunk)) {
+            try {
+                get(block);
+            } catch (Throwable t) {
+                warn("failed to hydrate machine state at " + describe(block) + " during chunk load ("
+                        + t.getClass().getName() + ": " + t.getMessage() + "); it will not resume until "
+                        + "something else touches it.");
+            }
+        }
     }
 
     /**

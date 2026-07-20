@@ -103,6 +103,14 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
         step("machine store", () -> {
             store = new MachineStore(this, machines);
             getServer().getPluginManager().registerEvents(store, this);
+            // MachineStore#onChunkLoad only covers chunks that load AFTER the line
+            // above registers it. A chunk already resident in memory when the plugin
+            // enables -- the common case on a server restart -- would otherwise never
+            // hydrate at all, and a mid-smelt machine in it would silently stop
+            // running until something incidental (a GUI open, a redstone change)
+            // happened to touch it. See MachineStore's class-level "Every path a
+            // machine can (re-)enter memory" note.
+            store.hydrateLoadedChunks();
         });
 
         // Ordering below this point follows the task spec exactly: config -> registry

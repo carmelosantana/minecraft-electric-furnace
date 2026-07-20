@@ -39,7 +39,7 @@ import java.util.function.Supplier;
  * <p>{@link #step} is the entire decision, expressed as a pure transition over
  * primitives -- no {@code org.bukkit} type -- so every stall, resume, and completion path
  * is table-tested with no running server, following the same pattern as
- * {@code FurnaceGui.mayRun}. Nothing about {@link #step}'s logic changed to add the
+ * {@code FurnaceGui.indicatorStateOf}. Nothing about {@link #step}'s logic changed to add the
  * runner below; it is still the sole authority for what one tick does to one machine.
  *
  * <h2>The Bukkit-facing runner</h2>
@@ -50,12 +50,25 @@ import java.util.function.Supplier;
  * uses, just at a much higher frequency, since progress and burn time are ticked here,
  * not merely displayed. Each pass iterates {@link MachineStore#liveStates()} --
  * deliberately never {@code MachineRegistry.machinesIn}, which would mean a chunk-PDC
- * read every single tick for every loaded chunk. Only machines already resident in
- * memory (opened at least once this session, or read by {@code MachineEffects} for a
- * nearby player) are ticked; a machine that has never been touched is provably at rest
- * ({@link MachineState#empty()}), and ticking it would resolve to
- * {@code STALLED_NO_RECIPE} and change nothing, so skipping it is behaviorally
- * identical to ticking it -- just without the PDC read.
+ * read every single tick for every loaded chunk.
+ *
+ * <p><b>This is safe only because {@code MachineStore} keeps {@code liveStates()}
+ * populated for every machine in a loaded chunk, not merely ones a player has
+ * touched.</b> An earlier version of this note claimed the opposite: that a machine
+ * absent from the live map "has never been touched" and is therefore "provably at
+ * rest" ({@link MachineState#empty()}), so skipping it changes nothing. That was
+ * already false the moment machine state started persisting to the block's own PDC --
+ * an untouched-this-session machine can have a half-finished run and a full fuel slot
+ * sitting on disk, and silently skipping it would mean exactly the "load it, walk
+ * away, come back to nothing having happened" failure this plugin exists to prevent.
+ * What actually makes iterating {@code liveStates()} correct is that
+ * {@code MachineStore#onChunkLoad} hydrates every registered machine in a chunk the
+ * moment it loads, and {@code MachineStore#hydrateLoadedChunks()} does the same once
+ * at plugin enable for chunks already resident in memory -- so by the time this
+ * ticker's task ever runs, "in a loaded chunk" and "in {@code liveStates()}" are the
+ * same set, modulo the one-tick window described in {@link #shouldSkipMachine}. See
+ * {@code MachineStore}'s class-level "Every path a machine can (re-)enter memory"
+ * note.
  *
  * <h2>Never destroy an item, never duplicate one</h2>
  *
