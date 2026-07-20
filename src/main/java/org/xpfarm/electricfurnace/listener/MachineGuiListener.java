@@ -262,23 +262,40 @@ public final class MachineGuiListener implements Listener {
      * click's item movement is applied by the server only after this event handler
      * returns, so reading slot contents synchronously here would see the pre-click
      * state.
+     *
+     * <p>Marks {@code top}'s pending-sync counter synchronously, before the deferral,
+     * and clears it from inside the deferred callback (in a {@code finally}, so every
+     * exit path -- including the early return below -- clears it). This is the other
+     * half of {@link FurnaceGui#refreshFromState}'s guard: it lets that method (called
+     * by the future {@code MachineTicker}) tell whether this exact sync is still in
+     * flight and skip a call that would otherwise collide with it. See
+     * {@link FurnaceGui#markPendingSync} for why marking must happen here, synchronously,
+     * rather than inside the deferred lambda.
      */
     private void scheduleSync(Player player, Inventory top) {
-        FurnaceGui.blockOf(top).ifPresent(block -> Bukkit.getScheduler().runTask(plugin, () -> {
-            if (!machines.isMachine(block)) {
-                // The block stopped being a machine between the click and this tick
-                // (e.g. broken by another player). Its store entry, if any, has already
-                // been handled by that path -- writing into it now would resurrect
-                // stale contents under whatever is now at this location.
-                return;
-            }
-            MachineState state = store.get(block);
-            FurnaceGui.syncToState(top, state);
-            boolean powered = block.getBlockPower() > 0;
-            EfConfig config = configSupplier.get();
-            FurnaceGui.refreshIndicator(top, config, powered, !state.isIdle(),
-                    state.progressTicks(), config.machine().smeltTicks());
-        }));
+        FurnaceGui.blockOf(top).ifPresent(block -> {
+            FurnaceGui.markPendingSync(top);
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                try {
+                    if (!machines.isMachine(block)) {
+                        // The block stopped being a machine between the click and this
+                        // tick (e.g. broken by another player). Its store entry, if
+                        // any, has already been handled by that path -- writing into it
+                        // now would resurrect stale contents under whatever is now at
+                        // this location.
+                        return;
+                    }
+                    MachineState state = store.get(block);
+                    FurnaceGui.syncToState(top, state);
+                    boolean powered = block.getBlockPower() > 0;
+                    EfConfig config = configSupplier.get();
+                    FurnaceGui.refreshIndicator(top, config, powered, !state.isIdle(),
+                            state.progressTicks(), config.machine().smeltTicks());
+                } finally {
+                    FurnaceGui.clearPendingSync(top);
+                }
+            });
+        });
     }
 
     // =================================================================================

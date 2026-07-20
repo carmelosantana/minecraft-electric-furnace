@@ -144,6 +144,18 @@ public final class FurnaceGui {
         private final Block block;
         private Inventory inventory;
 
+        /**
+         * How many {@code MachineGuiListener#scheduleSync} deferred callbacks are
+         * currently in flight for this block's shared inventory. A plain {@code int},
+         * not a {@code boolean}: the same shared inventory can have more than one
+         * viewer, and each viewer's click schedules its own independent one-tick
+         * deferral, so a count (not a flag one callback could clear out from under
+         * another) is what keeps {@link #refreshFromState}'s guard correct. Read and
+         * written only on the Bukkit main thread, same as every other mutable field on
+         * this class.
+         */
+        private int pendingSyncCount;
+
         private Holder(Block block) {
             this.block = Objects.requireNonNull(block, "block");
         }
@@ -268,9 +280,52 @@ public final class FurnaceGui {
     }
 
     /**
+     * Marks one {@code MachineGuiListener#scheduleSync} deferred callback as in flight
+     * for {@code inventory}'s machine. Call synchronously, in the same tick as the
+     * click or drag that produced the deferral -- <em>before</em> the one-tick delay,
+     * not from inside it -- so {@link #refreshFromState} is guaranteed to see the
+     * marker the instant a driver could possibly run ahead of the deferred callback
+     * (a repeating task registered at {@code onEnable} has a lower task id than a
+     * one-shot scheduled afterward, so it runs first when both are due the same tick).
+     * A no-op if {@code inventory} is not a furnace GUI. Paired with
+     * {@link #clearPendingSync}.
+     */
+    public static void markPendingSync(Inventory inventory) {
+        if (inventory != null && inventory.getHolder() instanceof Holder holder) {
+            holder.pendingSyncCount++;
+        }
+    }
+
+    /**
+     * The other half of {@link #markPendingSync}: call from inside the deferred
+     * callback once it has run, in a {@code finally} so an early return (e.g. the
+     * block stopped being a machine before the callback fired) still clears it -- a
+     * count that never returns to zero would wedge {@link #refreshFromState} into
+     * skipping this machine forever. A no-op if {@code inventory} is not a furnace GUI.
+     */
+    public static void clearPendingSync(Inventory inventory) {
+        if (inventory != null && inventory.getHolder() instanceof Holder holder && holder.pendingSyncCount > 0) {
+            holder.pendingSyncCount--;
+        }
+    }
+
+    /**
+     * Pure guard for {@link #refreshFromState}: whether a pending-sync count means a
+     * {@code MachineGuiListener#scheduleSync} deferred callback for this machine has
+     * not run yet. Extracted from {@code refreshFromState} itself -- which cannot be
+     * constructed headlessly, since it takes a real {@code Inventory} -- so the
+     * polarity of the decision is pinned by a server-less test: a positive count must
+     * skip, never run.
+     */
+    static boolean shouldSkipRefresh(int pendingSyncCount) {
+        return pendingSyncCount > 0;
+    }
+
+    /**
      * The inverse direction from {@link #syncToState}: pushes {@code state}'s current
      * input/fuel/output arrays into {@code inventory}'s slots, then redraws the status
-     * indicator.
+     * indicator -- unless a deferred GUI-&gt;state sync is still in flight for this
+     * machine, in which case this call is skipped entirely.
      *
      * <p>{@link #buildInventory} already does the input/fuel/output half of this once,
      * via {@link #populateFromState}, when a fresh inventory is first built. This
@@ -278,21 +333,35 @@ public final class FurnaceGui {
      * {@code MachineTicker}) that mutates a machine's {@link MachineState} -- consuming
      * inputs, producing output -- <em>while</em> a viewer already has that block's GUI
      * open. Without pushing the change back into the shared {@code Inventory}, the
-     * open GUI would keep showing stale, pre-tick contents; worse, {@code MachineState}
-     * always permits taking from the output slot, so the very next click there would
-     * trigger {@code MachineGuiListener#scheduleSync}'s {@link #syncToState}, which
-     * would write that stale inventory back over the state -- resurrecting inputs the
-     * ticker already consumed and erasing output it already produced.
+     * open GUI would keep showing stale, pre-tick contents.
      *
-     * <p>Not called anywhere yet: no ticker mutates a live {@code MachineState} under
-     * an open GUI today. Wiring an actual call is the future ticker's responsibility;
-     * this method only needs to exist and be correct so that work has something to
-     * call.
+     * <p><b>The collision this guards against.</b>
+     * {@code MachineGuiListener#scheduleSync} defers folding a click's item movement
+     * into {@code state} by one tick, because Bukkit only finishes applying the move
+     * after its own event handler returns. A driver calling this method in that same
+     * window -- and it would run first, per {@link #markPendingSync}'s javadoc -- would
+     * collide with it in both directions: repopulating from state before the deferred
+     * sync runs would overwrite an item a player just placed (already gone from their
+     * inventory, not yet folded into {@code state}) with state's stale, item-less
+     * arrays, and the deferred sync would then copy that clobbered inventory back over
+     * state, so the item ends up nowhere; taking from the output slot (always
+     * permitted) would similarly get repopulated from stale state before the deferred
+     * sync overwrites state with the already-empty inventory, so the item ends up both
+     * on the player's cursor and, briefly, back in the GUI and state. Guarding on
+     * {@link #shouldSkipRefresh} closes both directions: this call is skipped entirely
+     * while any deferred sync for this machine is outstanding, and resumes on the
+     * following call once {@link #clearPendingSync} has run -- which, for a driver that
+     * ticks every server tick, means "the very next tick," not an indefinite stall.
      */
     public static void refreshFromState(Inventory inventory, MachineState state, EfConfig config, boolean powered) {
         Objects.requireNonNull(inventory, "inventory");
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(config, "config");
+
+        int pendingSyncCount = inventory.getHolder() instanceof Holder holder ? holder.pendingSyncCount : 0;
+        if (shouldSkipRefresh(pendingSyncCount)) {
+            return;
+        }
 
         populateFromState(inventory, state);
         refreshIndicator(inventory, config, powered, !state.isIdle(), state.progressTicks(),
@@ -589,6 +658,15 @@ public final class FurnaceGui {
      * {@code SimplePluginManager#fireEvent} skips every {@code RegisteredListener}
      * belonging to a disabled plugin, so {@code MachineGuiListener#onClose} never runs
      * here.
+     *
+     * <p>Each viewer's body ({@link #persist}, {@link #closeAllSteps}'s steps) runs
+     * inside its own {@code try}/{@code catch (Throwable)}: {@link MachineStore#forget}
+     * and {@link #returnAllItems} (via {@code dropItemNaturally}) can both still throw
+     * during world teardown even though {@link #persist} already swallows its own
+     * failures, and an uncaught throw here would abort the loop for every remaining
+     * viewer -- or, worse, strand one viewer's items outright if it landed between
+     * {@code forget} clearing the PDC and {@code returnAllItems} handing the items
+     * over. A failure is logged and shutdown moves on to the next viewer.
      */
     public static void closeAll(MachineStore store) {
         for (Player player : Bukkit.getOnlinePlayers()) {
@@ -597,21 +675,36 @@ public final class FurnaceGui {
                 continue;
             }
             Block block = holder.block();
-            boolean persisted = persist(top, block, store);
-            for (CloseAllStep step : closeAllSteps(persisted)) {
-                switch (step) {
-                    case PERSIST -> {
-                        // Nothing further to do -- persisted (computed above) already
-                        // captures that this attempt succeeded.
-                    }
-                    case RETURN -> {
-                        if (store != null) {
-                            store.forget(block);
+            // Per-viewer try/catch: persist() already swallows its own failures, but
+            // store.forget (whose block.getState() call is not itself guarded -- see
+            // MachineStore#forget) and returnAllItems -> dropItemNaturally can both
+            // still throw here, e.g. during world teardown. Without this guard, a throw
+            // would abort the loop for every remaining viewer; worse, a throw between
+            // forget and returnAllItems would destroy that one viewer's items outright
+            // (PDC already cleared, inventory never handed over). Logging and moving on
+            // keeps one bad viewer from stranding the rest.
+            try {
+                boolean persisted = persist(top, block, store);
+                for (CloseAllStep step : closeAllSteps(persisted)) {
+                    switch (step) {
+                        case PERSIST -> {
+                            // Nothing further to do -- persisted (computed above)
+                            // already captures that this attempt succeeded.
                         }
-                        returnAllItems(top, player);
+                        case RETURN -> {
+                            if (store != null) {
+                                store.forget(block);
+                            }
+                            returnAllItems(top, player);
+                        }
+                        case CLOSE -> player.closeInventory();
                     }
-                    case CLOSE -> player.closeInventory();
                 }
+            } catch (Throwable t) {
+                LOGGER.warning("ElectricFurnace: failed to close the Electric Furnace GUI for "
+                        + player.getName() + " at " + describe(block) + " during shutdown ("
+                        + t.getClass().getName() + ": " + t.getMessage()
+                        + "); continuing to the next viewer.");
             }
         }
     }
