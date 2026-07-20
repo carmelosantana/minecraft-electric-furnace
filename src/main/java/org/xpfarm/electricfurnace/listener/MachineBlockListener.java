@@ -265,17 +265,51 @@ public final class MachineBlockListener implements Listener {
      * machine's own vanilla block inventory, in either direction. See the class-level
      * "Hoppers, known limitation" note for why this is unconditional rather than
      * routed into {@link MachineState}.
+     *
+     * <p><b>Fails safe, not open.</b> {@code getHolder()} (reached through
+     * {@link #belongsToMachine}) can throw, and Bukkit's own handling of a throwing
+     * listener is to log it and move on -- which for an unwrapped handler here would
+     * leave the event exactly as it started: <em>not</em> cancelled. That is the
+     * dangerous direction to fail in: the transfer is then allowed, and items go into
+     * the machine's ignored vanilla {@code BLAST_FURNACE} inventory, where they are
+     * invisible and unreachable (see the class-level note). Wrapping the whole
+     * decision and defaulting to {@code setCancelled(true)} on any failure means the
+     * worst case is a hopper that stops working near this block, never one that
+     * silently swallows items into a dead inventory.
      */
     @EventHandler(ignoreCancelled = true)
     public void onInventoryMove(InventoryMoveItemEvent event) {
-        if (belongsToMachine(event.getSource()) || belongsToMachine(event.getDestination())) {
+        try {
+            if (belongsToMachine(event.getSource()) || belongsToMachine(event.getDestination())) {
+                event.setCancelled(true);
+            }
+        } catch (Throwable t) {
             event.setCancelled(true);
         }
     }
 
+    /**
+     * Whether {@code inventory} belongs to a registered machine's own vanilla block
+     * inventory.
+     *
+     * <p>{@code blockState.getType() == Material.BLAST_FURNACE} is a cheap pre-gate
+     * checked <b>before</b> {@link MachineRegistry#isMachine}: a machine block is
+     * always a {@code BLAST_FURNACE} (see {@link org.xpfarm.electricfurnace.item.MachineItemFactory}),
+     * so this rejects essentially every hopper/dropper/dispenser transfer on the
+     * server for the cost of a field read, before {@code isMachine} -> {@code
+     * readCoords} gets anywhere near the chunk's {@code PersistentDataContainer}.
+     * {@link InventoryMoveItemEvent} fires per hopper per transfer attempt,
+     * server-wide, so this matters: without the pre-gate, every single one of those
+     * events -- for both its source and its destination inventory -- decodes a PDC
+     * string and allocates a {@code HashSet} on the hot path, for blocks that are
+     * essentially never a furnace at all. {@code isMachine} remains the authoritative
+     * check; this only short-circuits the overwhelmingly common case where it would
+     * have said "no" anyway.
+     */
     private boolean belongsToMachine(Inventory inventory) {
         return inventory != null
                 && inventory.getHolder() instanceof BlockState blockState
+                && blockState.getType() == Material.BLAST_FURNACE
                 && machines.isMachine(blockState.getBlock());
     }
 }

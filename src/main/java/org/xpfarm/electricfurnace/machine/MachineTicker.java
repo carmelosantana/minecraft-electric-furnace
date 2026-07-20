@@ -67,7 +67,15 @@ import java.util.function.Supplier;
  *       {@code MachineStore#flushAll} and {@code MachineEffects} already do for their
  *       own per-machine loops -- an exception inside a scheduled task is otherwise
  *       swallowed by the scheduler, aborting the pass partway through, which is exactly
- *       how items get destroyed.</li>
+ *       how items get destroyed. {@link #run()} also snapshots
+ *       {@link MachineStore#liveStates()}'s entries into a plain list before iterating,
+ *       and wraps the snapshot-and-iterate step in its own outer {@code try}/{@code
+ *       catch} as a backstop -- {@code liveStates()} returns an unmodifiable *view*
+ *       over {@code MachineStore}'s live map, not a copy, so a concurrent structural
+ *       change to that map would otherwise throw {@code ConcurrentModificationException}
+ *       from outside every per-machine guard. See {@code MachineStore#live}'s javadoc
+ *       for why that map is a {@code ConcurrentHashMap} rather than a plain one --
+ *       the two mitigations close this from both ends.</li>
  *   <li><b>A machine mid-deferred-sync is skipped entirely, not merely under-refreshed.</b>
  *       {@code MachineGuiListener#scheduleSync} defers folding a click's item movement
  *       into {@link MachineState} by one tick. {@code FurnaceGui#shouldSkipRefresh}
@@ -254,18 +262,41 @@ public final class MachineTicker {
         EfConfig config = configSupplier.get();
         AlloyRegistry alloys = alloysSupplier.get();
 
-        for (Map.Entry<Block, MachineState> entry : store.liveStates().entrySet()) {
-            Block block = entry.getKey();
-            try {
-                tickOne(block, entry.getValue(), config, alloys);
-            } catch (Throwable t) {
-                // Never let one corrupt/unlucky machine abort the pass for the rest of
-                // the server's machines -- a mid-pass throw here is swallowed by the
-                // scheduler with no further handling of its own, which is exactly how
-                // items get destroyed partway through a batch operation.
-                plugin.getLogger().warning("ElectricFurnace: failed to tick machine at " + describe(block)
-                        + " (" + t.getClass().getName() + ": " + t.getMessage() + "); skipping it this tick.");
+        try {
+            // Snapshot the entries before iterating, rather than iterating
+            // store.liveStates() directly. liveStates() is Collections.unmodifiableMap
+            // (an unmodifiable *view*) over MachineStore's own live map, not a copy --
+            // a concurrent structural change to that backing map (e.g.
+            // MachineStore#onChunkUnload removing an entry, which MachineStore's own
+            // javadoc now documents can run off the main thread on Paper, the same as
+            // MachineEffects#byChunk) would otherwise throw
+            // ConcurrentModificationException out of entrySet().iterator() itself --
+            // outside the per-machine try/catch below -- aborting this entire pass
+            // partway through every machine after the one being modified. That is
+            // exactly how items get destroyed: some machines this tick, none the next.
+            // This snapshot and MachineStore#live being a ConcurrentHashMap are
+            // complementary, not redundant -- see that field's javadoc.
+            List<Map.Entry<Block, MachineState>> snapshot = new ArrayList<>(store.liveStates().entrySet());
+            for (Map.Entry<Block, MachineState> entry : snapshot) {
+                Block block = entry.getKey();
+                try {
+                    tickOne(block, entry.getValue(), config, alloys);
+                } catch (Throwable t) {
+                    // Never let one corrupt/unlucky machine abort the pass for the rest of
+                    // the server's machines -- a mid-pass throw here is swallowed by the
+                    // scheduler with no further handling of its own, which is exactly how
+                    // items get destroyed partway through a batch operation.
+                    plugin.getLogger().warning("ElectricFurnace: failed to tick machine at " + describe(block)
+                            + " (" + t.getClass().getName() + ": " + t.getMessage() + "); skipping it this tick.");
+                }
             }
+        } catch (Throwable t) {
+            // Backstop over the snapshot step and the loop machinery itself, not just
+            // each machine's tick -- belt-and-braces alongside the snapshot above, so
+            // even a failure this class did not anticipate degrades to "skip the rest
+            // of this tick" rather than escaping into the scheduler.
+            plugin.getLogger().warning("ElectricFurnace: machine ticker pass failed ("
+                    + t.getClass().getName() + ": " + t.getMessage() + "); skipping the rest of this tick.");
         }
     }
 

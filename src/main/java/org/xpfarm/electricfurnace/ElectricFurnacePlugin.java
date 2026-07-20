@@ -65,7 +65,12 @@ import java.util.List;
  * because it persists every live machine's state to its own PDC; {@code closeAll}
  * runs second and makes one more per-open-GUI attempt to sync and flush that specific
  * machine, only returning items directly to the viewing player if that attempt fails.
- * See the notes on {@code MachineStore#flushAll} and {@code FurnaceGui#closeAll}.
+ * See the notes on {@code MachineStore#flushAll} and {@code FurnaceGui#closeAll}. All
+ * three steps -- stopping the ticker, {@code flushAll}, and {@code closeAll} -- are
+ * individually wrapped in their own {@code try}/{@code catch}: an unguarded throw
+ * from any one of them would abort {@code onDisable} before the steps after it ever
+ * ran, and for the ticker in particular, which runs first, that would mean losing
+ * every live machine's state before {@code flushAll} got a chance to persist it.
  */
 public final class ElectricFurnacePlugin extends JavaPlugin {
 
@@ -153,9 +158,16 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
         // Stopped FIRST, before anything else touches machine state: once this
         // returns, nothing on the server is still mutating a MachineState, so
         // flushAll/closeAll below see a value that will not change out from under them
-        // mid-shutdown.
+        // mid-shutdown. Guarded like the two steps below it: task.cancel() throwing
+        // (unwrapped) would abort onDisable before flushAll ever runs, losing every
+        // live machine's state -- the one thing this ordering exists to prevent.
         if (ticker != null) {
-            ticker.stop();
+            try {
+                ticker.stop();
+            } catch (Throwable t) {
+                warn("ElectricFurnace: failed to stop the machine ticker during shutdown ("
+                        + t.getClass().getName() + ": " + t.getMessage() + ").");
+            }
         }
         // Persists every live machine's contents to its own block PDC directly. Must
         // run BEFORE FurnaceGui.closeAll() and must not be replaced with anything that

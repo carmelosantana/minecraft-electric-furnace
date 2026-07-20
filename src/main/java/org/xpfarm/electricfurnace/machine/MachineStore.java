@@ -22,9 +22,9 @@ import org.bukkit.plugin.Plugin;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
 
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Holds every currently-in-memory {@link MachineState}, hydrating it from a machine
@@ -90,8 +90,30 @@ public final class MachineStore implements Listener {
      * is world+coordinate based (see {@link MachineRegistry#machinesIn}), so the same
      * physical machine always maps to the same entry regardless of which {@code Block}
      * instance is used to look it up.
+     *
+     * <h3>Why this is concurrent</h3>
+     *
+     * <p>{@code MachineEffects#byChunk} documents that "chunk load/unload events may
+     * arrive off the main thread on Paper" and uses a {@link ConcurrentHashMap} for
+     * exactly that reason. {@link #onChunkUnload} reacts to that very same
+     * {@link ChunkUnloadEvent} and removes from this map -- so if that javadoc is
+     * right, this map is written from the same off-main-thread path {@code byChunk}
+     * was built to survive. A plain {@link java.util.LinkedHashMap} here previously
+     * disagreed with that assumption while sharing the same event: {@link #get} (via
+     * {@code computeIfAbsent}) and {@link #liveStates} could then race a concurrent
+     * {@link #onChunkUnload} removal and throw {@code ConcurrentModificationException}
+     * (or worse, corrupt the map's internal structure, since {@code LinkedHashMap} is
+     * not safe for concurrent structural modification even without an active
+     * iterator). Rather than have two collaborators in this plugin assert
+     * contradictory things about the same events, this map now matches
+     * {@code MachineEffects}'s documented assumption. {@link MachineTicker#run()}
+     * additionally snapshots {@link #liveStates()}'s entries before iterating, as a
+     * second, independent guard -- the two mitigations are complementary: this field
+     * being concurrent stops the map itself from being corrupted by a racing write,
+     * while the ticker's snapshot stops a mid-pass structural change (even a
+     * perfectly safe one) from skipping or double-visiting an entry within one tick.
      */
-    private final Map<Block, MachineState> live = new LinkedHashMap<>();
+    private final Map<Block, MachineState> live = new ConcurrentHashMap<>();
 
     public MachineStore(Plugin plugin, MachineRegistry machines) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
