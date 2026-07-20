@@ -6,7 +6,7 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 - Slug: `electric-furnace`
 - Repository: `carmelosantana/minecraft-electric-furnace`
 - Owner: `Carmelo Santana`
-- Target version: `0.1.1`
+- Target version: `0.2.0`
 - Paper version: `26.1.2 build 74`
 - Java version: `25`
 - Updater destination: `electric-furnace.jar`
@@ -17,6 +17,22 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 Maven coordinates: `org.xpfarm:electric-furnace`. `plugin.yml` name: `ElectricFurnace`.
 
 Full design: [docs/superpowers/specs/2026-07-19-electric-furnace-design.md](superpowers/specs/2026-07-19-electric-furnace-design.md)
+(v1, click-to-smelt -- partially superseded).
+
+**Continuous operation (`0.2.0`, branch `continuous-operation`):**
+[docs/superpowers/specs/2026-07-20-continuous-operation-design.md](superpowers/specs/2026-07-20-continuous-operation-design.md)
+/ [docs/superpowers/plans/2026-07-20-continuous-operation-plan.md](superpowers/plans/2026-07-20-continuous-operation-plan.md).
+Converts the machine from instantaneous click-to-smelt into one that smelts over
+time (80 ticks/item at the new default speed), drains redstone as burn time (one
+dust = 200 ticks via `machine.burn-ticks-per-redstone`, replacing the removed
+`machine.fuel-per-operation` -- a **breaking config change**), locks input slots
+while a run is advancing, cancels hopper transfers into/out of the machine's own
+vanilla block inventory (see `MachineBlockListener`'s "Hoppers, known limitation"
+note), and persists each machine's contents/run-state in the **machine block's own**
+`PersistentDataContainer` (via `MachineStateCodec`/`MachineStore`) so a machine kept
+running with nobody watching survives chunk unload, world save, and a full server
+restart. This is layered on top of, not a replacement for, the chunk-PDC
+**location** registry (`MachineRegistry`) the v1 design above describes.
 
 ## 1. Scope
 
@@ -45,9 +61,19 @@ to go.
 `BlockPlaceEvent` (register machine), `BlockBreakEvent` (deregister, return item),
 `PlayerInteractEvent` (open custom GUI, cancel native blast furnace GUI),
 `BlockRedstoneEvent` (gating signal, running state, copper bulb),
-`InventoryClickEvent` (slot guards, output extraction), `InventoryCloseEvent`
-(return in-flight inputs), `ChunkLoadEvent` / `ChunkUnloadEvent` (maintain the
-effects scheduler's active set).
+`InventoryClickEvent` (slot guards, output extraction; input slots additionally
+locked while a run is advancing), `InventoryCloseEvent` (fold the closed GUI's
+contents back into the machine's persisted state; items no longer return to the
+player -- see Persistence below), `InventoryMoveItemEvent` (unconditionally cancel
+any hopper/dropper/dispenser transfer touching a registered machine's vanilla block
+inventory -- known limitation, see below), `ChunkLoadEvent` / `ChunkUnloadEvent`
+(maintain the effects scheduler's active set, **and** hydrate/flush each machine's
+contents/run-state to and from its block PDC so a mid-smelt machine keeps running
+across a chunk unload/reload with nobody watching), `WorldSaveEvent` (flush every
+live machine's state on every autosave, not only on a clean shutdown),
+`EntityExplodeEvent` / `BlockExplodeEvent` (salvage instead of vanilla-destroy),
+`BlockPistonExtendEvent` / `BlockPistonRetractEvent` (refuse to displace a
+registered machine).
 
 ### Permissions
 
@@ -60,13 +86,23 @@ effects scheduler's active set).
 
 ### Configuration
 
-Sections: `machine.*` (smelt speed multiplier, fuel per operation, require-signal
-toggle, status bulb), `effects.*` (enabled, period-ticks, player-radius, sound),
-`recycling.*` (slots, yield-same-metal `3`, yield-mixed-alloy `2`,
-yield-remelt-alloy `1`, accept-damaged), `alloys.<id>.*` (name, lore, color, inputs,
-stat block). Every numeric key is range-validated on load; invalid values warn and
-fall back to the default rather than disabling the plugin. Full table in the design
-doc.
+Sections: `machine.*` (smelt speed multiplier, **`burn-ticks-per-redstone`**,
+require-signal toggle, status bulb), `effects.*` (enabled, period-ticks,
+player-radius, sound), `recycling.*` (slots, yield-same-metal `3`,
+yield-mixed-alloy `2`, yield-remelt-alloy `1`, accept-damaged), `alloys.<id>.*`
+(name, lore, color, inputs, stat block). Every numeric key is range-validated on
+load; invalid values warn and fall back to the default rather than disabling the
+plugin. Full table in the v1 design doc; the continuous-operation delta is in the
+`2026-07-20` spec's own "Configuration" section.
+
+**Breaking change (continuous operation, `0.2.0`):** `machine.fuel-per-operation`
+was **removed**, not deprecated. `EfConfig` detects the old key present in
+`config.yml` and warns by name rather than silently ignoring it. It is replaced by
+`machine.burn-ticks-per-redstone` (default `200`, validated `20`–`6000`): one
+redstone dust now buys that many ticks of burn time, drained only while a run is
+actively advancing, rather than a fixed quantity consumed per completed operation.
+`machine.smelt-speed-multiplier`'s default also changed, `2.0` → `2.5`, giving `80`
+ticks (~4s) per item at default settings.
 
 An earlier draft listed `alloys.balance-ceiling.enabled`. It was **not implemented,
 deliberately** — a ceiling an operator can switch off is not a ceiling. The clamp is
@@ -75,9 +111,23 @@ and clamp target.
 
 ### Persistence
 
-Chunk `PersistentDataContainer`, keyed by block coordinates within the chunk. No
-flat file, no database. Machines load and unload with their chunks, which also
-supplies the effects scheduler's active set.
+**Two separate `PersistentDataContainer`s, deliberately kept apart:**
+
+- **Location** (unchanged from v1): the owning **chunk**'s PDC, keyed by block
+  coordinates within the chunk (`MachineRegistry`). No flat file, no database.
+  Machines load and unload with their chunks, which also supplies the effects
+  scheduler's active set.
+- **Contents and run-state** (new, continuous operation, `0.2.0`): each machine
+  **block**'s own PDC (`MachineStateCodec` / `MachineStore`) — its five input slots,
+  fuel, output, `progressTicks`, and `burnTicksRemaining`. Hydrated from the block's
+  PDC on first access (a GUI open, a redstone change, or a `ChunkLoadEvent` — see
+  Events above) and flushed back on every path a machine can leave memory: chunk
+  unload, world save, block break, and plugin shutdown (`onDisable` calls
+  `MachineStore#flushAll()` directly, before `FurnaceGui.closeAll()`, since Bukkit
+  skips event dispatch to an already-disabled plugin). This is what makes "load it,
+  walk away, come back to ingots" true: a machine kept running with nobody watching
+  survives a chunk unload/reload or a full server restart because its progress and
+  fuel are on disk, not only in memory.
 
 Items carry a **shared** cross-plugin contract: `xpfarm:custom_material` and
 `xpfarm:material_id` (both `STRING`).
@@ -97,7 +147,14 @@ constructor — **no jar dependency in either direction.**
 1. A crafted machine item places a `BLAST_FURNACE` registered as a machine; registration survives restart.
 2. Breaking the machine returns the custom item and deregisters the location.
 3. No redstone signal → does not run, even with dust in the fuel slot.
-4. Signal + dust → operation completes and consumes the configured dust.
+4. Signal + dust → progress advances one tick at a time (80 ticks/item at default
+   speed) instead of completing instantly; one dust buys 200 ticks of burn, drained
+   only while a run is actively advancing.
+4a. A mid-smelt machine's chunk unloads and reloads (or the server restarts) with
+    nobody watching → progress and fuel are exactly as they were, and ticking
+    resumes without any player interaction.
+4b. Input slots are locked (cannot be withdrawn or overwritten) while a run is
+    advancing; the fuel slot may still be topped up.
 5. 5× iron ingots yields exactly 3 iron ingots.
 6. 5× mixed metals yields exactly 2 generic Fused Alloy ingots.
 7. 4× iron + 1× coal yields exactly 2 Steel ingots (named recipe match).
@@ -119,7 +176,8 @@ constructor — **no jar dependency in either direction.**
 - **`BLOCK_BEACON_AMBIENT` Geyser sound mapping unverified.** Must be confirmed by in-game Bedrock testing at gate 7a. Fails silently if unmapped, so it degrades safely.
 - **`ELECTRIC_SPARK` visual fidelity on Bedrock unconfirmed.** Mapped, but appearance not verified.
 - **No shared item library with CopperKingdom.** The cross-plugin PDC contract ships instead. Extraction is deferred until CopperKingdom's enum-based type system, inert durability, dead recipe config, and missing attack-speed are fixed.
-- **Machines in unloaded chunks do not process.** Deliberate — no chunk-forcing.
+- **Machines in unloaded chunks do not process.** Deliberate — no chunk-forcing. (Continuous operation, `0.2.0`: this remains true, but a machine now resumes exactly where it left off the instant its chunk loads again, rather than needing something incidental to touch it first.)
+- **Hoppers cannot feed or drain a machine (continuous operation, `0.2.0`).** A registered machine block is still a vanilla `BLAST_FURNACE` underneath, with its own 3-slot vanilla smelting inventory entirely separate from this plugin's custom GUI and `MachineState`. `MachineBlockListener#onInventoryMove` unconditionally cancels every hopper/dropper/dispenser transfer touching that vanilla inventory in either direction, because routing hopper items into `MachineState` the way a player's click does was judged not worth the risk of writing them into the ignored vanilla inventory instead — deliberate, not a config toggle.
 
 No gates are intentionally withheld. Status is `active`; the full pipeline runs.
 
@@ -168,8 +226,20 @@ unchanged; the contradiction is not propagated.
 
 ## 4. Compatibility
 
+**Continuous operation (`0.2.0`) note:** the bullets below were originally recorded
+against `0.1.0`/`0.1.1`. The branch adds no new player-facing interaction surface --
+still inventory clicks and commands only, the new `InventoryMoveItemEvent` handler
+and chunk-load hydration are both non-interactive plugin internals -- so the
+Geyser/Floodgate/ViaVersion conclusions below still hold on inspection and were not
+struck. The compile check does have fresh evidence from this fix pass (below). None
+of this substitutes for a live client join, which remains gate 7a's job and is
+recorded outstanding for this branch below.
+
 - [x] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '1.21'`.
   - `mvn clean verify` BUILD SUCCESS. Embedded `plugin.yml` confirmed `api-version: '1.21'`.
+  - **Re-verified for `0.2.0` (continuous-operation fix pass, 2026-07-20):** see
+    Gate 6 below for the fresh `mvn --batch-mode --no-transfer-progress clean verify`
+    run and its exact output.
 - [x] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared.
   - **None.** No `depend`, `softdepend`, or `loadbefore`/`loadafter` entries, deliberately.
     CopperKingdom interop is read-only via `NamespacedKey`'s String constructor, which
@@ -209,31 +279,82 @@ unchanged; the contradiction is not propagated.
 
 ## 6. Tests and build
 
+**Superseded for `0.2.0`.** The `238 tests` / `electric-furnace-0.1.0.jar` bullets
+below describe the pre-continuous-operation build and are kept only as history; they
+do not describe the current branch. Fresh evidence gathered against this exact fix
+pass (continuous-operation, targeting `0.2.0`) replaces them immediately below.
+
 - [x] Unit tests cover separable logic, configuration, serialization, permissions, and failure paths where applicable.
-  - **238 tests, 0 failures.** Coverage spans config validation and clamping, the pure
-    recycle resolver (all eight rules with precedence), alloy registry and
-    balance-ceiling clamping, metal classification, chunk-key encode/decode including
-    hostile input, GUI slot roles and guard decisions, command argument parsing and
-    per-subcommand permissions, and the effects gate.
-  - Bukkit types (`ItemStack`, `Inventory`, `Block`, `Player`) cannot be constructed
-    headlessly, so decisions were extracted into pure functions and tested there —
-    e.g. `MetalClassifier.resolveBranch` over all 16 boolean combinations,
-    `FurnaceGui.shutdownSteps()` as ordered data, `allowedSubcommandTokens` over all
-    permission subsets. Fix agents verified new tests fail against deliberately broken
-    implementations before restoring them.
+  - **298 tests, 0 failures** (continuous-operation fix pass, 2026-07-20; superseded
+    the `238 tests` figure below). The suite stood at 306 tests going into this fix
+    pass; this pass removed the 8 `FurnaceGui.mayRun` tests (6 individual cases plus
+    its hand-written truth table and the table's own exhaustiveness check) as part of
+    the M1 disposition — `mayRun` was dead code in `src/main` (see
+    `.superpowers/sdd/final-fix-report.md`), and `MachineTicker.step` is the one
+    decision function the ticker actually drives from. Net: 306 − 8 = 298. Coverage
+    beyond the `238`-test v1 baseline spans `MachineTicker.step`'s full
+    stall/resume/completion outcome table, `MachineTicker.shouldSkipMachine`,
+    `MachineStateCodec`'s versioned byte-frame encode/decode (including
+    hostile/truncated input), `MachineStore`'s documentation-level flush/hydrate
+    discipline, `FurnaceGui`'s slot-lock and deferred-GUI-sync guards, and
+    `MachineEffects`'s `APPROVED_PARTICLES` allowlist test.
+  - Bukkit types (`ItemStack`, `Inventory`, `Block`, `Player`, `TileState`) cannot be
+    constructed headlessly, so decisions stay extracted into pure functions and
+    tested there — e.g. `MetalClassifier.resolveBranch` over all 16 boolean
+    combinations, `MachineTicker.step` over its full outcome table,
+    `allowedSubcommandTokens` over all permission subsets. `MachineStore`'s and
+    `MachineBlockListener`'s new per-machine try/catch guards (this fix pass's R1/R2)
+    could not be given a headless test for the same reason — see this fix pass's
+    report for what was and was not testable.
 - [x] `mvn --batch-mode --no-transfer-progress clean verify` succeeds.
-  - BUILD SUCCESS, 238 tests, 0 failures/errors/skipped.
+  - **BUILD SUCCESS, 298 tests, 0 failures/errors/skipped** (continuous-operation fix
+    pass, 2026-07-20). Exact command and output recorded in
+    `.superpowers/sdd/final-fix-report.md`.
 - [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded.
-  - `target/electric-furnace-0.1.0.jar`: embedded `plugin.yml` shows version `0.1.0`,
-    main `org.xpfarm.electricfurnace.ElectricFurnacePlugin`, `api-version '1.21'`, the
-    `electricfurnace` command, and all four permission nodes. No server API bundled
-    (`org/bukkit`, `io/papermc`, `net/kyori` all absent — paper-api correctly
-    `provided`). `original-electric-furnace-0.1.0.jar` exists in `target/` and is
-    excluded from release assets by the workflow's `! -name 'original-*'` filter.
+  - `target/electric-furnace-0.2.0.jar`: embedded `plugin.yml` shows version
+    `0.2.0`, main `org.xpfarm.electricfurnace.ElectricFurnacePlugin`, `api-version
+    '1.21'`, the `electricfurnace` command, and all four permission nodes. No server
+    API bundled (`org/bukkit`, `io/papermc`, `net/kyori` all absent — paper-api
+    correctly `provided`). `original-electric-furnace-0.2.0.jar` exists in `target/`
+    and is excluded from release assets by the workflow's `! -name 'original-*'`
+    filter.
+
+### Historical (v0.1.0/v0.1.1, superseded)
+
+- **238 tests, 0 failures.** Coverage spans config validation and clamping, the pure
+  recycle resolver (all eight rules with precedence), alloy registry and
+  balance-ceiling clamping, metal classification, chunk-key encode/decode including
+  hostile input, GUI slot roles and guard decisions, command argument parsing and
+  per-subcommand permissions, and the effects gate.
+- BUILD SUCCESS, 238 tests, 0 failures/errors/skipped.
+- `target/electric-furnace-0.1.0.jar`: embedded `plugin.yml` shows version `0.1.0`,
+  main `org.xpfarm.electricfurnace.ElectricFurnacePlugin`, `api-version '1.21'`, the
+  `electricfurnace` command, and all four permission nodes. No server API bundled
+  (`org/bukkit`, `io/papermc`, `net/kyori` all absent — paper-api correctly
+  `provided`). `original-electric-furnace-0.1.0.jar` exists in `target/` and is
+  excluded from release assets by the workflow's `! -name 'original-*'` filter.
 
 ## 7. Matrix
 
-### 7a — Single-plugin runtime verification (this plugin only) — PASSED
+### 7a — Single-plugin runtime verification (this plugin only) — OUTSTANDING for `0.2.0`
+
+**Not re-run against the continuous-operation branch.** This fix pass is a code and
+documentation fix pass, not a release cut, and did not boot a Legendary stack or
+join a client. Everything continuous operation changes at runtime -- chunk-load
+hydration actually resuming a mid-smelt machine, burn time actually draining as
+configured, input-slot locking actually blocking a click, hopper cancellation
+actually firing, block-PDC persistence actually surviving a real chunk unload/reload
+-- is unverified by live observation and rests on unit tests and code review only.
+This must be re-run by `minecraft-plugin-dev` (or equivalent) before `0.2.0` ships,
+and specifically must observe: a machine mid-smelt surviving a chunk unload and
+reload with nobody watching (the branch's headline claim), burn time draining only
+while a run advances, locked input slots under a live click, and a hopper transfer
+being cancelled against the machine's vanilla inventory.
+
+The evidence below is retained as history for `v0.1.0`/`v0.1.1` (pre-continuous-
+operation) and does not stand in for the run above.
+
+### Historical (v0.1.0) — PASSED
 
 Disposable Legendary stack, fresh volume, ports leased via `xpfarm-slot` (slot 0),
 torn down and lease released after each run. Verified twice: once on `ca5d378`, and
@@ -282,6 +403,12 @@ Evidence from the second run:
 
 ### 7b — Ten-plugin ecosystem matrix
 
+**Historical (v0.1.1), not re-run for `0.2.0`.** Out-of-band per its own note below,
+and this fix pass did not trigger a re-run (no updater manifest change, no
+Paper/Geyser/Floodgate/ViaVersion bump). Not required before this branch merges or
+before `0.2.0` releases, but the record below predates continuous operation and
+should not be read as evidence about it.
+
 - [x] Fresh-volume [Legendary Java Minecraft Geyser Floodgate stack](https://github.com/TheRemote/Legendary-Java-Minecraft-Geyser-Floodgate) test covers all updater-managed plugins.
   - **Out of band, and not a prerequisite for this plugin's release.** Belongs to
     `minecraft-plugin-matrix`, triggered by an updater manifest change, a
@@ -326,19 +453,33 @@ coexist and enable, not that this plugin's in-game behavior works.
 
 ## 8. CI/CD
 
+**`0.2.0` note:** the workflow file itself (checkbox 1) and its permission scope
+(checkbox 3) are durable facts unaffected by this branch's content and remain
+accurate as recorded. Checkbox 2's run/commit reference predates this branch and is
+history only — `continuous-operation` has not yet had a green `main` Actions run
+under its own commit, because it has not yet merged. That run is a prerequisite
+`minecraft-plugin-release` will need before tagging `v0.2.0`, not something this fix
+pass can produce.
+
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
   - `.github/workflows/build.yml` copied byte-for-byte from the CopperKingdom reference, which matches `GITHUB_ACTIONS.md`. Triggers: push to `main`, `v*` tags, PRs targeting `main`, `workflow_dispatch`. `actions/checkout@v7`, `actions/setup-java@v5` (Temurin 25, Maven cache), `mvn --batch-mode --no-transfer-progress clean verify`, `SHA256SUMS.txt` excluding `original-*`, `actions/upload-artifact@v7`, tag-gated `gh release view`/`create`/`upload --clobber`.
-- [x] Successful main Actions run is recorded before tagging.
-  - Left for `minecraft-plugin-release` (gate 8b) to tick, per the gate split — but the
-    evidence now exists: run
+- [ ] Successful main Actions run is recorded before tagging.
+  - **Not yet true for `0.2.0`.** Historical evidence for `0.1.0`/`0.1.1` only: run
     [29706471487](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29706471487)
     on `main` (commit `9025cf9`) completed **success** in 25s, 2026-07-19, building
     the full 238-test suite on Temurin 25 in a clean environment. The earlier scaffold
-    run 29703069182 also succeeded.
+    run 29703069182 also succeeded. `continuous-operation` needs its own green `main`
+    run before `minecraft-plugin-release` tags `v0.2.0`.
 - [x] Workflow permissions contain no broader access than the documented contract.
   - `permissions: contents: write` only. No `packages:`, `id-token:`, or other scopes.
 
 ## 9. Release
+
+**`0.2.0` has not been tagged or released.** Everything below this line records the
+`v0.1.0`/`v0.1.1` release history, which remains accurate as history but is not
+evidence about `0.2.0`. `minecraft-plugin-release` owns cutting and verifying the
+`0.2.0` release once gate 8's fresh main run (above) and gate 7a's outstanding
+runtime re-verification (above) are both satisfied.
 
 - [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag.
   - POM `0.1.0`; `plugin.yml` uses `version: '${project.version}'` (no hardcoded drift);
