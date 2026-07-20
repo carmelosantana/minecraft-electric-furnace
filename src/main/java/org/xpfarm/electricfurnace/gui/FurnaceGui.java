@@ -50,13 +50,16 @@ import java.util.logging.Logger;
  * (the block is about to be broken) and {@link #closeAll} (shutdown, and only for a
  * machine whose state could not be persisted).
  *
- * <p>The processing gate ({@link #mayRun}) and the status-indicator decision
- * ({@link #indicatorStateOf}) are pure functions over primitives/enums -- no
- * {@code org.bukkit} type -- so {@code FurnaceGuiTest} exercises every combination
- * with no running server, following the same pattern as
+ * <p>The status-indicator decision ({@link #indicatorStateOf}) and the output-slot
+ * classification ({@link #classifyOutputSlot}) are pure functions over
+ * primitives/enums -- no {@code org.bukkit} type -- so {@code FurnaceGuiTest}
+ * exercises every combination with no running server, following the same pattern as
  * {@code MetalClassifier.resolveBranch}. Recipe resolution itself (what used to be
- * {@code tryProcess}) has moved to {@code MachineTicker}, which advances every loaded
- * machine on its own schedule instead of once per GUI click.
+ * {@code tryProcess}, gated by a {@code mayRun}-style processing check) has moved to
+ * {@code MachineTicker}, which advances every loaded machine on its own schedule
+ * instead of once per GUI click -- {@code MachineTicker.Conditions} and
+ * {@code MachineTicker#step} are that ticker's own equivalent decision, not a caller
+ * of anything in this class.
  */
 public final class FurnaceGui {
 
@@ -116,23 +119,6 @@ public final class FurnaceGui {
         SAME_ITEM,
         /** The output slot holds something else -- or the same item with no room left -- blocking the run. */
         DIFFERENT_ITEM
-    }
-
-    /**
-     * The processing gate: an operation may run only when effectively powered
-     * (powered, or {@code requireSignal} is {@code false}), fuel is present, and the
-     * output slot does not block it. An output slot occupied by a different item (or
-     * the same item with no stacking room left) never runs and never consumes fuel --
-     * a player's output is never silently overwritten or corrupted.
-     *
-     * <p>Kept here (rather than moved wholesale to {@code MachineTicker}) because it is
-     * pure, already exhaustively tested, and is exactly the shape of decision
-     * {@code MachineTicker}'s Bukkit-facing driver needs to compute {@code recipeValid}
-     * and {@code outputBlocked} every tick.
-     */
-    public static boolean mayRun(boolean powered, boolean requireSignal, boolean hasFuel, OutputSlotState outputSlotState) {
-        boolean effectivePowered = !requireSignal || powered;
-        return effectivePowered && hasFuel && outputSlotState != OutputSlotState.DIFFERENT_ITEM;
     }
 
     // =================================================================================
@@ -426,9 +412,9 @@ public final class FurnaceGui {
      * would exceed the max stack size -- an overflowing stack is exactly the kind of
      * silent corruption this plugin must never cause.
      *
-     * <p>Kept alongside {@link #mayRun} for {@code MachineTicker}'s driver: it needs
-     * this exact classification and there is no reason to make it reinvent it. Public
-     * for that cross-package caller.
+     * <p>Public for {@code MachineTicker}'s driver, which needs this exact
+     * classification every tick to decide {@code Conditions.outputBlocked} and there
+     * is no reason to make it reinvent it.
      */
     public static OutputSlotState classifyOutputSlot(ItemStack current, ItemStack candidate) {
         if (current == null || current.getType() == Material.AIR) {

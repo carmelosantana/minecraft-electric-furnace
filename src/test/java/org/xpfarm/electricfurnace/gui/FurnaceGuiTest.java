@@ -18,110 +18,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Pure unit tests for {@link FurnaceGui}'s processing gate ({@link FurnaceGui#mayRun})
- * and status-indicator decision ({@link FurnaceGui#indicatorStateOf}). Both are plain
- * functions over booleans/enums -- no {@code org.bukkit} type, no running server.
- *
- * <p>{@link #mayRun_everyCombination} exhaustively covers all
- * {@code 2 x 2 x 2 x 3 = 24} combinations of (powered, requireSignal, hasFuel,
- * outputSlotState), following the same exhaustive-boolean-combination pattern as
- * {@code MetalClassifierTest}'s coverage of {@code MetalClassifier.resolveBranch}.
+ * Pure unit tests for {@link FurnaceGui}'s status-indicator decision
+ * ({@link FurnaceGui#indicatorStateOf}). It is a plain function over booleans/enums --
+ * no {@code org.bukkit} type, no running server.
  */
 class FurnaceGuiTest {
-
-    // ---- mayRun: the processing gate ------------------------------------------------
-
-    @Test
-    void mayRun_poweredWithFuelAndEmptyOutput_runs() {
-        assertTrue(FurnaceGui.mayRun(true, true, true, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_poweredWithFuelAndMatchingOutput_runs() {
-        assertTrue(FurnaceGui.mayRun(true, true, true, FurnaceGui.OutputSlotState.SAME_ITEM));
-    }
-
-    @Test
-    void mayRun_unpoweredWhenSignalRequired_doesNotRun() {
-        assertFalse(FurnaceGui.mayRun(false, true, true, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_unpoweredWhenSignalNotRequired_stillRuns() {
-        assertTrue(FurnaceGui.mayRun(false, false, true, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_noFuel_doesNotRun() {
-        assertFalse(FurnaceGui.mayRun(true, true, false, FurnaceGui.OutputSlotState.EMPTY));
-    }
-
-    @Test
-    void mayRun_outputHoldsDifferentItem_doesNotRun_evenWhenPoweredAndFueled() {
-        assertFalse(FurnaceGui.mayRun(true, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM));
-    }
-
-    /**
-     * The complete {@code mayRun} truth table, written out by hand.
-     *
-     * <p>Rows are {@code {powered, requireSignal, hasFuel, outputSlotState, expected}}.
-     * Deliberately NOT derived from the implementation's own boolean expression: an
-     * "expected" value that restates the implementation passes against any
-     * implementation matching that restatement, wrong ones included. All 24 outcomes are
-     * therefore spelled out literally.
-     */
-    private static final Object[][] MAY_RUN_TABLE = {
-            // Powered, signal required -- runs only with fuel and a non-blocking output.
-            {true, true, true, FurnaceGui.OutputSlotState.EMPTY, true},
-            {true, true, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
-            {true, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {true, true, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {true, true, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {true, true, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-
-            // Powered, signal not required -- same as above; power is moot.
-            {true, false, true, FurnaceGui.OutputSlotState.EMPTY, true},
-            {true, false, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
-            {true, false, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {true, false, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {true, false, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {true, false, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-
-            // Unpowered, signal required -- never runs, whatever else is true.
-            {false, true, true, FurnaceGui.OutputSlotState.EMPTY, false},
-            {false, true, true, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {false, true, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {false, true, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {false, true, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {false, true, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-
-            // Unpowered but signal not required -- runs on fuel + non-blocking output.
-            {false, false, true, FurnaceGui.OutputSlotState.EMPTY, true},
-            {false, false, true, FurnaceGui.OutputSlotState.SAME_ITEM, true},
-            {false, false, true, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-            {false, false, false, FurnaceGui.OutputSlotState.EMPTY, false},
-            {false, false, false, FurnaceGui.OutputSlotState.SAME_ITEM, false},
-            {false, false, false, FurnaceGui.OutputSlotState.DIFFERENT_ITEM, false},
-    };
-
-    @Test
-    void mayRun_matchesTheHandWrittenTruthTable() {
-        for (Object[] row : MAY_RUN_TABLE) {
-            boolean powered = (Boolean) row[0];
-            boolean requireSignal = (Boolean) row[1];
-            boolean hasFuel = (Boolean) row[2];
-            FurnaceGui.OutputSlotState state = (FurnaceGui.OutputSlotState) row[3];
-            boolean expected = (Boolean) row[4];
-            assertEquals(expected, FurnaceGui.mayRun(powered, requireSignal, hasFuel, state),
-                    () -> "powered=" + powered + " requireSignal=" + requireSignal
-                            + " hasFuel=" + hasFuel + " state=" + state);
-        }
-    }
-
-    @Test
-    void mayRun_truthTableIsExhaustive() {
-        assertEquals(2 * 2 * 2 * FurnaceGui.OutputSlotState.values().length, MAY_RUN_TABLE.length);
-    }
 
     // ---- indicatorStateOf ------------------------------------------------------------
 

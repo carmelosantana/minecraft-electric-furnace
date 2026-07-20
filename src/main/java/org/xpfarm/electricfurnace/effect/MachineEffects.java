@@ -100,7 +100,7 @@ import java.util.function.Supplier;
  * <p>The decisions -- {@link #shouldSchedule}, {@link #machineIsActive},
  * {@link #shouldEmitSparks}, {@link #shouldEmitSmoke} -- are static functions over
  * primitives, so {@code MachineEffectsTest} pins them exhaustively with no running
- * server, following the pattern of {@code FurnaceGui#mayRun} and
+ * server, following the pattern of {@code FurnaceGui#indicatorStateOf} and
  * {@code GuiLayout#roleOf}. What remains in this class is Bukkit glue thin enough to
  * read.
  *
