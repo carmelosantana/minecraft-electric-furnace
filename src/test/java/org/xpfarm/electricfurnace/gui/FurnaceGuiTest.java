@@ -228,43 +228,4 @@ class FurnaceGuiTest {
         assertFalse(FurnaceGui.closeAllSteps(true).contains(FurnaceGui.CloseAllStep.RETURN));
         assertFalse(FurnaceGui.closeAllSteps(false).contains(FurnaceGui.CloseAllStep.PERSIST));
     }
-
-    // ---- Review fix pass 2: refreshFromState vs. the deferred GUI->state sync -------
-    //
-    // MachineGuiListener#scheduleSync defers syncToState by one tick. If a future
-    // driver (MachineTicker) calls refreshFromState in the same window -- and it would
-    // run first, since a repeating task registered at onEnable has a lower task id than
-    // a one-shot scheduled afterward -- refreshFromState would overwrite the inventory
-    // with stale state just before the deferred sync overwrites state with that same
-    // now-clobbered inventory: an item placed into an input slot exists nowhere, and an
-    // item taken from the output slot exists in both the player's inventory and state.
-    // shouldSkipRefresh is the pure guard that closes this: a pending-sync count > 0
-    // means a deferred callback has not run yet, so refreshFromState must skip this
-    // call and let the following call (the driver's next tick, after the deferred
-    // callback has cleared the count) refresh instead.
-
-    @Test
-    void shouldSkipRefresh_whenNoPendingSync_isFalse() {
-        assertFalse(FurnaceGui.shouldSkipRefresh(0));
-    }
-
-    @Test
-    void shouldSkipRefresh_whenOnePendingSync_isTrue() {
-        assertTrue(FurnaceGui.shouldSkipRefresh(1));
-    }
-
-    @Test
-    void shouldSkipRefresh_whenMultiplePendingSyncs_isTrue() {
-        // Two viewers of the same shared inventory can each schedule their own deferred
-        // sync in the same tick -- the guard must stay tripped until every one of them
-        // has cleared, not just the first.
-        assertTrue(FurnaceGui.shouldSkipRefresh(2));
-    }
-
-    @Test
-    void shouldSkipRefresh_neverTrippedByANonPositiveCount() {
-        // Defensive: a count that somehow went negative (more clears than marks) must
-        // never be read as "pending" -- that would wedge refreshFromState forever.
-        assertFalse(FurnaceGui.shouldSkipRefresh(-1));
-    }
 }

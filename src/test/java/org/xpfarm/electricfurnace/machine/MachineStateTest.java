@@ -9,12 +9,14 @@
  */
 package org.xpfarm.electricfurnace.machine;
 
+import org.bukkit.block.Block;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -188,11 +190,44 @@ class MachineStateTest {
         assertEquals(22, restored.burnTicksRemaining());
     }
 
+    /**
+     * A {@link Block} that does nothing, so a {@link MachineState} can be constructed with
+     * no running server.
+     *
+     * <p>{@code MachineState} needs a block because its item storage is a Bukkit inventory
+     * bound to one, but its run counters are ordinary integer logic that must stay
+     * testable. A reflective stub gets that: {@code MachineState.empty} only stores the
+     * reference, and the counter methods below never reach the inventory, so no method on
+     * this proxy is ever actually called. Anything that did touch the slots would fail
+     * loudly here rather than silently pass.
+     */
+    private static Block stubBlock() {
+        return (Block) Proxy.newProxyInstance(
+                Block.class.getClassLoader(),
+                new Class<?>[]{Block.class},
+                (proxy, method, args) -> {
+                    throw new UnsupportedOperationException(
+                            "MachineState must not touch the block for " + method.getName());
+                });
+    }
+
     @Test
     void isIdle_reflectsProgress() {
-        MachineState state = MachineState.empty();
+        MachineState state = MachineState.empty(stubBlock());
         assertEquals(true, state.isIdle());
         state.setProgressTicks(1);
         assertEquals(false, state.isIdle());
+    }
+
+    @Test
+    void progressAndBurnCounters_clampNegativesToZero() {
+        MachineState state = MachineState.empty(stubBlock());
+
+        state.setProgressTicks(-5);
+        state.setBurnTicksRemaining(-1);
+
+        assertEquals(0, state.progressTicks());
+        assertEquals(0, state.burnTicksRemaining());
+        assertEquals(true, state.isIdle());
     }
 }
