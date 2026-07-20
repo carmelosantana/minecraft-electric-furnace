@@ -47,20 +47,20 @@ import java.util.List;
  * the values directly would have pinned each collaborator to the config it was
  * constructed with, and a reload would silently do nothing to them.
  *
- * <h2>Shutdown returns items</h2>
+ * <h2>Shutdown never loses items</h2>
  *
  * <p>{@link #onDisable} calls {@link MachineStore#flushAll()} <em>before</em>
- * {@link FurnaceGui#closeAll()}. Both methods exist because Bukkit clears
+ * {@link FurnaceGui#closeAll(MachineStore)}. Both methods exist because Bukkit clears
  * {@code isEnabled} before invoking {@code onDisable}, and {@code SimplePluginManager}
  * skips listeners belonging to a disabled plugin -- so neither
  * {@code MachineGuiListener#onClose} nor {@link MachineStore}'s own
  * {@code ChunkUnloadEvent}/{@code WorldSaveEvent} handlers ever fire here. Each class
  * works around this the same way: by calling its item-safety logic directly as a
  * plain method rather than relying on event dispatch. {@code flushAll} runs first
- * because it persists every machine's contents to its own PDC; {@code closeAll} runs
- * second because it only returns a currently-open GUI's items to the viewing player,
- * which is a distinct concern. See the notes on {@code MachineStore#flushAll} and
- * {@code FurnaceGui#closeAll}.
+ * because it persists every live machine's state to its own PDC; {@code closeAll}
+ * runs second and makes one more per-open-GUI attempt to sync and flush that specific
+ * machine, only returning items directly to the viewing player if that attempt fails.
+ * See the notes on {@code MachineStore#flushAll} and {@code FurnaceGui#closeAll}.
  */
 public final class ElectricFurnacePlugin extends JavaPlugin {
 
@@ -98,9 +98,9 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(
                     new MachineBlockListener(machines, store, this::config), this);
             getServer().getPluginManager().registerEvents(
-                    new MachineGuiListener(this, this::config, this::alloys), this);
+                    new MachineGuiListener(this, store, machines, this::config), this);
             getServer().getPluginManager().registerEvents(
-                    new RedstoneListener(machines, this::config, this::alloys), this);
+                    new RedstoneListener(machines, store, this::config), this);
         });
 
         step("command", () -> {
@@ -147,10 +147,11 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
                         + t.getClass().getName() + ": " + t.getMessage() + ").");
             }
         }
-        // Returns every open viewer's inputs, fuel, and output directly. Must not be
+        // Makes one more per-viewer attempt to sync and flush each open GUI's contents,
+        // falling back to returning items directly only if that fails. Must not be
         // replaced with anything that depends on event dispatch -- see the class note.
         try {
-            FurnaceGui.closeAll();
+            FurnaceGui.closeAll(store);
         } catch (Throwable t) {
             warn("ElectricFurnace: failed to close open furnace GUIs during shutdown ("
                     + t.getClass().getName() + ": " + t.getMessage() + ").");

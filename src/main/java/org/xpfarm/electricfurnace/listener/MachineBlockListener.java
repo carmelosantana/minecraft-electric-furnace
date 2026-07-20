@@ -49,14 +49,13 @@ import java.util.function.Supplier;
  *
  * <p><b>Breaking:</b> a registered machine drops the machine item (never a plain
  * blast furnace) and the vanilla drop is cancelled. Anyone currently viewing that
- * block's GUI is force-closed first -- {@link FurnaceGui#closeForBlock} synchronously
- * fires {@code InventoryCloseEvent}, so their items are already back in their
- * inventory (or dropped at their feet) before the block disappears underneath the
- * (now nonexistent) custom inventory. The machine's own persisted contents -- its
- * inputs, fuel, and output, tracked separately by {@link MachineStore} from whatever
- * a currently-open GUI is showing -- are then dropped on the ground and the store
- * entry is forgotten, in that order: progress is forfeited, but no item is ever only
- * in memory when the block stops existing.
+ * block's GUI is force-closed first -- {@link FurnaceGui#closeForBlock} returns their
+ * items directly (never relying on {@code InventoryCloseEvent} to do it) before the
+ * block disappears underneath the (now nonexistent) custom inventory. The machine's
+ * own persisted contents -- its inputs, fuel, and output, tracked separately by
+ * {@link MachineStore} from whatever a currently-open GUI was showing -- are then
+ * dropped on the ground and the store entry is forgotten, in that order: progress is
+ * forfeited, but no item is ever only in memory when the block stops existing.
  *
  * <p><b>Right-click:</b> the event is <em>always</em> cancelled for a registered
  * machine before anything else runs -- if the vanilla blast furnace GUI were also
@@ -242,6 +241,6 @@ public final class MachineBlockListener implements Listener {
         }
 
         boolean powered = block.getBlockPower() > 0;
-        FurnaceGui.open(player, block, configSupplier.get(), powered);
+        FurnaceGui.open(player, block, configSupplier.get(), powered, store.get(block));
     }
 }

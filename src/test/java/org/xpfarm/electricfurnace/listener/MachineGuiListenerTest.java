@@ -12,6 +12,7 @@ package org.xpfarm.electricfurnace.listener;
 import org.bukkit.event.inventory.InventoryAction;
 import org.junit.jupiter.api.Test;
 import org.xpfarm.electricfurnace.gui.GuiLayout;
+import org.xpfarm.electricfurnace.gui.SlotLock;
 
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -400,5 +401,121 @@ class MachineGuiListenerTest {
                     || subset.contains(GuiLayout.SlotRole.OUTPUT);
             assertEquals(expected, MachineGuiListener.shouldCancelDrag(subset), "subset=" + subset);
         }
+    }
+
+    // ---- shouldCancelForLock(role, effect, running): the run-lock guard -------------
+
+    @Test
+    void lock_inputInsertWhileRunning_isCancelled() {
+        assertTrue(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.INPUT, new MachineGuiListener.ClickEffect(true, false), true));
+    }
+
+    @Test
+    void lock_inputRemoveWhileRunning_isCancelled() {
+        assertTrue(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.INPUT, new MachineGuiListener.ClickEffect(false, true), true));
+    }
+
+    @Test
+    void lock_inputInsertOrRemoveWhileIdle_isAllowed() {
+        assertFalse(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.INPUT, new MachineGuiListener.ClickEffect(true, false), false));
+        assertFalse(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.INPUT, new MachineGuiListener.ClickEffect(false, true), false));
+    }
+
+    @Test
+    void lock_fuelInsertWhileRunning_isAllowed_soARunningMachineCanBeToppedUp() {
+        assertFalse(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.FUEL, new MachineGuiListener.ClickEffect(true, false), true));
+    }
+
+    @Test
+    void lock_fuelRemoveWhileRunning_isCancelled() {
+        assertTrue(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.FUEL, new MachineGuiListener.ClickEffect(false, true), true));
+    }
+
+    @Test
+    void lock_fuelRemoveWhileIdle_isAllowed() {
+        assertFalse(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.FUEL, new MachineGuiListener.ClickEffect(false, true), false));
+    }
+
+    @Test
+    void lock_outputTake_isNeverCancelled_runningOrNot() {
+        assertFalse(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.OUTPUT, new MachineGuiListener.ClickEffect(false, true), true));
+        assertFalse(MachineGuiListener.shouldCancelForLock(
+                GuiLayout.SlotRole.OUTPUT, new MachineGuiListener.ClickEffect(false, true), false));
+    }
+
+    @Test
+    void lock_neitherPlaceNorTake_isNeverCancelled_forAnyRole() {
+        // shouldCancel(role, action) already handles FILLER/INDICATOR unconditionally;
+        // shouldCancelForLock only ever fires off an actual place or take.
+        for (GuiLayout.SlotRole role : GuiLayout.SlotRole.values()) {
+            assertFalse(MachineGuiListener.shouldCancelForLock(
+                    role, new MachineGuiListener.ClickEffect(false, false), true));
+        }
+    }
+
+    /**
+     * {@code shouldCancelForLock} is exhaustively cross-checked against
+     * {@link SlotLock#allows} directly -- the independently-tested (Task 4) source of
+     * truth for what the run lock permits -- rather than restating its own formula,
+     * over every {@code role x isPlace x isTake x running} combination (5*2*2*2 = 40).
+     */
+    @Test
+    void lock_matchesSlotLockAllowsForEveryCombination() {
+        for (GuiLayout.SlotRole role : GuiLayout.SlotRole.values()) {
+            for (boolean isPlace : new boolean[] {false, true}) {
+                for (boolean isTake : new boolean[] {false, true}) {
+                    for (boolean running : new boolean[] {false, true}) {
+                        boolean expected =
+                                (isPlace && !SlotLock.allows(role, SlotLock.Action.INSERT, running))
+                                        || (isTake && !SlotLock.allows(role, SlotLock.Action.REMOVE, running));
+                        MachineGuiListener.ClickEffect effect = new MachineGuiListener.ClickEffect(isPlace, isTake);
+                        assertEquals(expected, MachineGuiListener.shouldCancelForLock(role, effect, running),
+                                () -> "role=" + role + " isPlace=" + isPlace + " isTake=" + isTake
+                                        + " running=" + running);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- shouldCancelDragForLock(roles, running): the drag guard's run-lock counterpart
+
+    @Test
+    void dragLock_touchingInputWhileRunning_isCancelled() {
+        assertTrue(MachineGuiListener.shouldCancelDragForLock(Set.of(GuiLayout.SlotRole.INPUT), true));
+    }
+
+    @Test
+    void dragLock_touchingInputWhileIdle_isAllowed() {
+        assertFalse(MachineGuiListener.shouldCancelDragForLock(Set.of(GuiLayout.SlotRole.INPUT), false));
+    }
+
+    @Test
+    void dragLock_touchingOnlyFuelWhileRunning_isAllowed() {
+        // Drags always place, and fuel accepts insertion regardless of running.
+        assertFalse(MachineGuiListener.shouldCancelDragForLock(Set.of(GuiLayout.SlotRole.FUEL), true));
+    }
+
+    @Test
+    void dragLock_touchingOutputOrFillerOrIndicator_isCancelled_regardlessOfRunning() {
+        for (boolean running : new boolean[] {false, true}) {
+            assertTrue(MachineGuiListener.shouldCancelDragForLock(Set.of(GuiLayout.SlotRole.OUTPUT), running));
+            assertTrue(MachineGuiListener.shouldCancelDragForLock(Set.of(GuiLayout.SlotRole.FILLER), running));
+            assertTrue(MachineGuiListener.shouldCancelDragForLock(Set.of(GuiLayout.SlotRole.INDICATOR), running));
+        }
+    }
+
+    @Test
+    void dragLock_emptySet_isNeverCancelled() {
+        assertFalse(MachineGuiListener.shouldCancelDragForLock(Set.of(), true));
+        assertFalse(MachineGuiListener.shouldCancelDragForLock(Set.of(), false));
     }
 }
