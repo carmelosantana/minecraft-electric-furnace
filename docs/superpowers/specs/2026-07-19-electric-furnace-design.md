@@ -1,7 +1,13 @@
 # ElectricFurnace — Design
 
 - Date: 2026-07-19
-- Status: approved, pre-scaffold (gate 1 complete)
+- Status: approved, pre-scaffold (gate 1 complete) -- **superseded in part by
+  [2026-07-20-continuous-operation-design.md](2026-07-20-continuous-operation-design.md)**,
+  which converts the click-to-smelt v1 this document describes into a machine that
+  smelts over time, drains redstone as burn time, and persists its contents in the
+  machine block's own PDC. Where the two disagree, the 2026-07-20 document wins; see
+  its own "Configuration" section for the resulting breaking config change
+  (`machine.fuel-per-operation` removed).
 - Owner: Carmelo Santana
 
 ## Purpose
@@ -255,7 +261,7 @@ Extraction is a v2 concern and will require fixing the above first.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `machine.smelt-speed-multiplier` | double | `2.0` | vs. vanilla furnace |
-| `machine.fuel-per-operation` | int | `1` | redstone dust consumed |
+| ~~`machine.fuel-per-operation`~~ | ~~int~~ | ~~`1`~~ | **removed** in the continuous-operation branch; see the superseding note at the top of this document. Replaced by `machine.burn-ticks-per-redstone` (default `200`) -- redstone now buys burn time rather than a fixed per-operation quantity. |
 | `machine.require-redstone-signal` | bool | `true` | disable to fuel-only |
 | `machine.status-bulb.enabled` | bool | `true` | drive adjacent copper bulb |
 | `effects.enabled` | bool | `true` | |
