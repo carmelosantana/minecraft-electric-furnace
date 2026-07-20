@@ -10,6 +10,14 @@
 # a warning naming the key, the offending value, and the default it was replaced
 # with -- a typo in this file degrades gracefully to defaults, it never stops the
 # plugin from starting.
+#
+# Known limitation, not a config toggle: hoppers (and droppers/dispensers) cannot
+# feed an Electric Furnace, or pull from one, in either direction. The underlying
+# BLAST_FURNACE block still has its own vanilla 3-slot smelting inventory, entirely
+# separate from this plugin's custom GUI and persisted machine state; items a
+# hopper pushed into it would sit invisible and unreachable, never displayed and
+# never saved. Every such transfer is cancelled outright. Feed a machine through
+# its GUI.
 
 machine:
   # Multiplier applied to the vanilla 200-tick smelt duration. 2.5 means one item

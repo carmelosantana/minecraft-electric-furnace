@@ -26,6 +26,7 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
+import org.xpfarm.electricfurnace.machine.MachineStore;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -84,13 +85,24 @@ import java.util.function.Supplier;
  * {@link #approvedParticleNames()} exposes the list so a unit test can fail if a third
  * particle is ever added.
  *
+ * <h2>Sparks follow power; smoke follows work</h2>
+ *
+ * <p>{@link #shouldEmitSparks} and {@link #shouldEmitSmoke} are deliberately separate
+ * gates, not one combined "is this machine interesting" boolean. A powered machine with
+ * nothing queued still sparks -- that is what tells a player the redstone side of the
+ * machine is live -- but it does not smoke, and the beacon-hum sound (tied to the same
+ * gate as smoke, since both mean "actively smelting") does not play, until a smelt is
+ * actually advancing. Splitting them is what makes "energised but idle" and "actively
+ * working" visually distinguishable at a glance, without opening the GUI.
+ *
  * <h2>Testability</h2>
  *
  * <p>The decisions -- {@link #shouldSchedule}, {@link #machineIsActive},
- * {@link #shouldEmit} -- are static functions over primitives, so
- * {@code MachineEffectsTest} pins them exhaustively with no running server, following
- * the pattern of {@code FurnaceGui#mayRun} and {@code GuiLayout#roleOf}. What remains
- * in this class is Bukkit glue thin enough to read.
+ * {@link #shouldEmitSparks}, {@link #shouldEmitSmoke} -- are static functions over
+ * primitives, so {@code MachineEffectsTest} pins them exhaustively with no running
+ * server, following the pattern of {@code FurnaceGui#mayRun} and
+ * {@code GuiLayout#roleOf}. What remains in this class is Bukkit glue thin enough to
+ * read.
  *
  * <h2>Staying in sync with the machine registry</h2>
  *
@@ -124,6 +136,7 @@ public final class MachineEffects implements Listener, MachineRegistry.ChangeLis
 
     private final Plugin plugin;
     private final MachineRegistry machines;
+    private final MachineStore store;
     private final Supplier<EfConfig> configSupplier;
 
     /**
@@ -140,12 +153,18 @@ public final class MachineEffects implements Listener, MachineRegistry.ChangeLis
      * @param plugin         owning plugin, used only to schedule the single task
      * @param machines       the machine registry, consulted on chunk load -- never on
      *                       the hot path
+     * @param store          the block-PDC-backed machine contents/run-state store,
+     *                       consulted once per candidate machine per run (only after
+     *                       the nearby-player gate already passed) to decide
+     *                       {@link #shouldEmitSmoke}'s {@code smelting} fact
      * @param configSupplier live config accessor, so {@code /electricfurnace reload}
      *                       is picked up without rebuilding this object
      */
-    public MachineEffects(Plugin plugin, MachineRegistry machines, Supplier<EfConfig> configSupplier) {
+    public MachineEffects(Plugin plugin, MachineRegistry machines, MachineStore store,
+            Supplier<EfConfig> configSupplier) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.machines = Objects.requireNonNull(machines, "machines");
+        this.store = Objects.requireNonNull(store, "store");
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
         // The single choke point for every place/break/explosion-salvage that ever adds
         // or removes a machine -- see the class-level "Staying in sync" note.
@@ -175,16 +194,32 @@ public final class MachineEffects implements Listener, MachineRegistry.ChangeLis
     }
 
     /**
-     * The per-machine, per-run gate. Effects are emitted only for an active machine
-     * that at least one player is close enough to perceive.
+     * Whether sparks should be emitted for a machine: sparks show that the machine is
+     * energised, whether or not it currently has work to do. Distinct from
+     * {@link #shouldEmitSmoke} on purpose -- see the class-level "Sparks follow power;
+     * smoke follows work" note.
      *
-     * @param enabled          {@code effects.enabled}
-     * @param periodTicks      {@code effects.period-ticks}
+     * @param enabled           {@code effects.enabled}
      * @param nearbyPlayerCount how many players are within {@code effects.player-radius}
-     * @param machineActive    per {@link #machineIsActive}
+     * @param powered           per {@link #machineIsActive}
      */
-    public static boolean shouldEmit(boolean enabled, int periodTicks, int nearbyPlayerCount, boolean machineActive) {
-        return shouldSchedule(enabled, periodTicks) && machineActive && nearbyPlayerCount > 0;
+    public static boolean shouldEmitSparks(boolean enabled, int nearbyPlayerCount, boolean powered) {
+        return enabled && nearbyPlayerCount > 0 && powered;
+    }
+
+    /**
+     * Whether smoke -- and the beacon-hum sound, gated identically -- should be emitted
+     * for a machine: smoke shows actual work, appearing only while a smelt is actively
+     * advancing. A machine that is powered but idle (nothing queued, or stalled on
+     * fuel/output) sparks but never smokes.
+     *
+     * @param enabled           {@code effects.enabled}
+     * @param nearbyPlayerCount how many players are within {@code effects.player-radius}
+     * @param smelting          whether the machine currently has a run advancing
+     *                          ({@code progressTicks > 0})
+     */
+    public static boolean shouldEmitSmoke(boolean enabled, int nearbyPlayerCount, boolean smelting) {
+        return enabled && nearbyPlayerCount > 0 && smelting;
     }
 
     /** Names of the only particles this class emits; asserted by {@code MachineEffectsTest}. */
@@ -340,13 +375,13 @@ public final class MachineEffects implements Listener, MachineRegistry.ChangeLis
                 continue;
             }
             for (BlockPos pos : entry.getValue()) {
-                emitFor(world, pos, radius, requireSignal, enabled, period, soundName);
+                emitFor(world, pos, radius, requireSignal, enabled, soundName);
             }
         }
     }
 
     private void emitFor(World world, BlockPos pos, int radius, boolean requireSignal,
-            boolean enabled, int period, String soundName) {
+            boolean enabled, String soundName) {
         Location center = new Location(world, pos.x() + 0.5D, pos.y() + 1.05D, pos.z() + 0.5D);
 
         // Cheapest gate first: no observer, no work. Everything below this line --
@@ -357,22 +392,42 @@ public final class MachineEffects implements Listener, MachineRegistry.ChangeLis
         }
 
         Block block = world.getBlockAt(pos.x(), pos.y(), pos.z());
-        boolean active = machineIsActive(block.getBlockPower() > 0, requireSignal);
-        if (!shouldEmit(enabled, period, audience.size(), active)) {
+        boolean powered = machineIsActive(block.getBlockPower() > 0, requireSignal);
+        boolean smelting = isSmelting(block);
+
+        boolean emitSparks = shouldEmitSparks(enabled, audience.size(), powered);
+        boolean emitSmoke = shouldEmitSmoke(enabled, audience.size(), smelting);
+        if (!emitSparks && !emitSmoke) {
             return;
         }
 
         for (Player player : audience) {
             // Per-player overloads, deliberately: the broadcast overloads would send to
             // everyone tracking the chunk and quietly ignore effects.player-radius.
-            player.spawnParticle(Particle.ELECTRIC_SPARK, center, SPARK_COUNT, SPREAD, SPREAD, SPREAD, 0.0D);
-            player.spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, center, SMOKE_COUNT, SPREAD, SPREAD, SPREAD, 0.0D);
-            if (soundName != null) {
-                // Null means the configured sound name did not resolve; per EfConfig
-                // that disables sound only, leaving particles playing.
-                player.playSound(center, soundName, SoundCategory.BLOCKS, SOUND_VOLUME, SOUND_PITCH);
+            if (emitSparks) {
+                player.spawnParticle(Particle.ELECTRIC_SPARK, center, SPARK_COUNT, SPREAD, SPREAD, SPREAD, 0.0D);
+            }
+            if (emitSmoke) {
+                player.spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, center, SMOKE_COUNT, SPREAD, SPREAD, SPREAD, 0.0D);
+                if (soundName != null) {
+                    // Null means the configured sound name did not resolve; per EfConfig
+                    // that disables sound only, leaving particles playing.
+                    player.playSound(center, soundName, SoundCategory.BLOCKS, SOUND_VOLUME, SOUND_PITCH);
+                }
             }
         }
+    }
+
+    /**
+     * Whether the machine at {@code block} currently has a smelt actively advancing
+     * ({@code progressTicks > 0}), per its live {@link org.xpfarm.electricfurnace.machine.MachineState}.
+     * Reads through {@link MachineStore#get}, which hydrates from the block's own PDC
+     * on first access and is an in-memory lookup thereafter -- this is only ever called
+     * once the nearby-player gate above has already passed, so it never runs for a
+     * machine nobody is close enough to see.
+     */
+    private boolean isSmelting(Block block) {
+        return !store.get(block).isIdle();
     }
 
     // =================================================================================

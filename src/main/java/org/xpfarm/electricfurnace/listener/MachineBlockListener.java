@@ -13,6 +13,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Cancellable;
 import org.bukkit.event.EventHandler;
@@ -24,8 +25,10 @@ import org.bukkit.event.block.BlockPistonExtendEvent;
 import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
@@ -62,6 +65,19 @@ import java.util.function.Supplier;
  * allowed to open, a player could move items through it and bypass every guard in
  * {@link MachineGuiListener}. Only after cancelling do we check permission and open
  * the real GUI.
+ *
+ * <p><b>Hoppers, known limitation.</b> {@link #onInventoryMove} cancels every
+ * {@link InventoryMoveItemEvent} whose source or destination inventory belongs to a
+ * registered machine block. A {@code BLAST_FURNACE} still has its own vanilla
+ * 3-slot smelting inventory underneath, entirely separate from this plugin's custom
+ * GUI and from {@link MachineState}; a hopper feeding it (or pulling from it) would
+ * silently write items into that vanilla inventory, where they are never read,
+ * never displayed, and never persisted by {@link MachineStore} -- invisible and
+ * unreachable until the block is eventually broken and its (uninvolved) vanilla
+ * contents happen to spill out with it. Cancelling unconditionally is simpler and
+ * safer than trying to route hopper items into {@code MachineState} the way a
+ * player's click does; this is documented in {@code config.yml} as a known
+ * limitation, not exposed as a config toggle.
  */
 public final class MachineBlockListener implements Listener {
 
@@ -242,5 +258,24 @@ public final class MachineBlockListener implements Listener {
 
         boolean powered = block.getBlockPower() > 0;
         FurnaceGui.open(player, block, configSupplier.get(), powered, store.get(block));
+    }
+
+    /**
+     * Cancels any hopper (or dropper/dispenser) transfer touching a registered
+     * machine's own vanilla block inventory, in either direction. See the class-level
+     * "Hoppers, known limitation" note for why this is unconditional rather than
+     * routed into {@link MachineState}.
+     */
+    @EventHandler(ignoreCancelled = true)
+    public void onInventoryMove(InventoryMoveItemEvent event) {
+        if (belongsToMachine(event.getSource()) || belongsToMachine(event.getDestination())) {
+            event.setCancelled(true);
+        }
+    }
+
+    private boolean belongsToMachine(Inventory inventory) {
+        return inventory != null
+                && inventory.getHolder() instanceof BlockState blockState
+                && machines.isMachine(blockState.getBlock());
     }
 }

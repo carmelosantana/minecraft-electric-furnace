@@ -21,6 +21,7 @@ import org.xpfarm.electricfurnace.listener.MachineGuiListener;
 import org.xpfarm.electricfurnace.listener.RedstoneListener;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
 import org.xpfarm.electricfurnace.machine.MachineStore;
+import org.xpfarm.electricfurnace.machine.MachineTicker;
 import org.xpfarm.electricfurnace.recipe.MachineRecipe;
 
 import java.util.List;
@@ -49,8 +50,12 @@ import java.util.List;
  *
  * <h2>Shutdown never loses items</h2>
  *
- * <p>{@link #onDisable} calls {@link MachineStore#flushAll()} <em>before</em>
- * {@link FurnaceGui#closeAll(MachineStore)}. Both methods exist because Bukkit clears
+ * <p>{@link #onDisable} stops {@link MachineTicker} <em>first</em>, then calls
+ * {@link MachineStore#flushAll()}, then {@link FurnaceGui#closeAll(MachineStore)}, then
+ * stops {@link MachineEffects} last. The ticker is stopped before anything else touches
+ * machine state so nothing mutates a {@link org.xpfarm.electricfurnace.machine.MachineState}
+ * out from under {@code flushAll}/{@code closeAll} mid-shutdown. {@code flushAll} then
+ * runs <em>before</em> {@code closeAll} for a second, independent reason: Bukkit clears
  * {@code isEnabled} before invoking {@code onDisable}, and {@code SimplePluginManager}
  * skips listeners belonging to a disabled plugin -- so neither
  * {@code MachineGuiListener#onClose} nor {@link MachineStore}'s own
@@ -69,6 +74,7 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
     private MachineRegistry machines;
     private MachineStore store;
     private MachineEffects effects;
+    private MachineTicker ticker;
 
     @Override
     public void onEnable() {
@@ -92,6 +98,22 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
         step("machine store", () -> {
             store = new MachineStore(this, machines);
             getServer().getPluginManager().registerEvents(store, this);
+        });
+
+        // Ordering below this point follows the task spec exactly: config -> registry
+        // -> store -> effects -> ticker -> listeners. Effects and the ticker are both
+        // schedule-only until start()/registerEvents() run, so nothing observable
+        // depends on this order today, but keeping it matches the documented contract
+        // and keeps onDisable's mirrored (reverse-ish) order easy to reason about.
+        step("effects", () -> {
+            effects = new MachineEffects(this, machines, store, this::config);
+            getServer().getPluginManager().registerEvents(effects, this);
+            effects.start();
+        });
+
+        step("ticker", () -> {
+            ticker = new MachineTicker(this, store, this::config, this::alloys);
+            ticker.start();
         });
 
         step("listeners", () -> {
@@ -121,20 +143,19 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(new MachineRecipe(), this);
         });
 
-        step("effects", () -> {
-            effects = new MachineEffects(this, machines, this::config);
-            getServer().getPluginManager().registerEvents(effects, this);
-            effects.start();
-        });
-
         getLogger().info("ElectricFurnace enabled (" + alloys.all().size() + " alloys, effects "
-                + (effects != null && effects.isRunning() ? "on" : "off") + ").");
+                + (effects != null && effects.isRunning() ? "on" : "off") + ", ticker "
+                + (ticker != null && ticker.isRunning() ? "on" : "off") + ").");
     }
 
     @Override
     public void onDisable() {
-        if (effects != null) {
-            effects.stop();
+        // Stopped FIRST, before anything else touches machine state: once this
+        // returns, nothing on the server is still mutating a MachineState, so
+        // flushAll/closeAll below see a value that will not change out from under them
+        // mid-shutdown.
+        if (ticker != null) {
+            ticker.stop();
         }
         // Persists every live machine's contents to its own block PDC directly. Must
         // run BEFORE FurnaceGui.closeAll() and must not be replaced with anything that
@@ -155,6 +176,12 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
         } catch (Throwable t) {
             warn("ElectricFurnace: failed to close open furnace GUIs during shutdown ("
                     + t.getClass().getName() + ": " + t.getMessage() + ").");
+        }
+        // Stopped last: nothing above depends on effects still running, and stopping
+        // it earlier would buy nothing -- effects only ever read state, never mutate
+        // it, so it was never part of the item-safety ordering above.
+        if (effects != null) {
+            effects.stop();
         }
         MachineRecipe.unregister();
     }
@@ -209,6 +236,11 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
     /** The single global effects loop, or {@code null} if it failed to wire. */
     public MachineEffects effects() {
         return effects;
+    }
+
+    /** The single global machine ticker, or {@code null} if it failed to wire. */
+    public MachineTicker ticker() {
+        return ticker;
     }
 
     private void warn(String message) {

@@ -322,6 +322,27 @@ public final class FurnaceGui {
     }
 
     /**
+     * How many {@code MachineGuiListener#scheduleSync} deferred callbacks are
+     * currently in flight for {@code block}'s shared inventory, or {@code 0} if no
+     * online player currently has that block's GUI open.
+     *
+     * <p>{@code MachineTicker}'s runner reads this -- together with the pure
+     * {@code MachineTicker#shouldSkipMachine} -- to skip a machine <b>entirely</b> for
+     * a tick, not merely skip repainting its GUI, while a deferred sync is still in
+     * flight for it. See {@link #shouldSkipRefresh}'s note on the collision this two-
+     * part guard closes: that guard alone stops a stale repaint, but does nothing to
+     * stop a driver from mutating {@link MachineState} itself during the same window,
+     * which is what actually causes duplicated fuel once the deferred sync later
+     * overwrites state with the (stale, pre-tick) inventory contents.
+     */
+    public static int pendingSyncCount(Block block) {
+        Objects.requireNonNull(block, "block");
+        return findOpenInventory(block)
+                .map(inventory -> inventory.getHolder() instanceof Holder holder ? holder.pendingSyncCount : 0)
+                .orElse(0);
+    }
+
+    /**
      * The inverse direction from {@link #syncToState}: pushes {@code state}'s current
      * input/fuel/output arrays into {@code inventory}'s slots, then redraws the status
      * indicator -- unless a deferred GUI-&gt;state sync is still in flight for this
@@ -384,7 +405,17 @@ public final class FurnaceGui {
 
     /** Whether the fuel slot holds redstone at all. One dust buys burn time; there is no per-operation quantity. */
     private static boolean hasFuel(Inventory inventory) {
-        ItemStack fuel = inventory.getItem(GuiLayout.FUEL_SLOT);
+        return hasFuel(inventory.getItem(GuiLayout.FUEL_SLOT));
+    }
+
+    /**
+     * Whether {@code fuel} counts as fuel at all: any amount of redstone. One dust buys
+     * burn time; there is no per-operation quantity. Public so {@code MachineTicker}'s
+     * runner shares this exact definition for its {@code Conditions.fuelAvailable}
+     * rather than reimplementing it against a {@link MachineState} field instead of an
+     * {@link Inventory} slot.
+     */
+    public static boolean hasFuel(ItemStack fuel) {
         return fuel != null && fuel.getType() == Material.REDSTONE && fuel.getAmount() > 0;
     }
 
@@ -395,10 +426,11 @@ public final class FurnaceGui {
      * would exceed the max stack size -- an overflowing stack is exactly the kind of
      * silent corruption this plugin must never cause.
      *
-     * <p>Kept alongside {@link #mayRun} for {@code MachineTicker}'s future driver: it
-     * needs this exact classification and there is no reason to make it reinvent it.
+     * <p>Kept alongside {@link #mayRun} for {@code MachineTicker}'s driver: it needs
+     * this exact classification and there is no reason to make it reinvent it. Public
+     * for that cross-package caller.
      */
-    static OutputSlotState classifyOutputSlot(ItemStack current, ItemStack candidate) {
+    public static OutputSlotState classifyOutputSlot(ItemStack current, ItemStack candidate) {
         if (current == null || current.getType() == Material.AIR) {
             if (candidate == null) {
                 return OutputSlotState.DIFFERENT_ITEM;
@@ -527,6 +559,15 @@ public final class FurnaceGui {
      * items: {@link #closeForBlock} (the block is being broken) and {@link #closeAll}
      * (shutdown, only when persisting failed). A normal close does not call this --
      * see {@link #syncToState}.
+     *
+     * <p><b>Gives before clearing, per slot.</b> Each slot is handed to the player (or
+     * dropped) <em>before</em> its slot is cleared. If {@link #giveOrDrop} -&gt;
+     * {@code dropItemNaturally} throws -- exactly the world-teardown scenario
+     * {@link #closeAll}'s per-viewer {@code try}/{@code catch} exists for -- the item
+     * is still sitting in that slot when the exception propagates, not already cleared
+     * and gone nowhere. Clearing first (the previous order) meant a mid-loop throw left
+     * that one slot's item existing in zero places: not on the player, not dropped, and
+     * no longer in the inventory either.
      */
     public static void returnAllItems(Inventory inventory, Player player) {
         Objects.requireNonNull(inventory, "inventory");
@@ -541,8 +582,8 @@ public final class FurnaceGui {
             if (item == null || item.getType() == Material.AIR) {
                 continue;
             }
-            inventory.setItem(slot, null);
             giveOrDrop(player, item);
+            inventory.setItem(slot, null);
         }
     }
 

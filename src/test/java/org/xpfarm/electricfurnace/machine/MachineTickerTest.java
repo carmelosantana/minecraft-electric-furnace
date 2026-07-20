@@ -137,4 +137,51 @@ class MachineTickerTest {
 
         assertEquals(200, step.burnTicksRemaining());
     }
+
+    // ---- shouldSkipMachine -- carried-forward Task 6 review defect -------------------
+    //
+    // FurnaceGui#shouldSkipRefresh alone only stops a stale GUI repaint during
+    // MachineGuiListener#scheduleSync's one-tick deferral window; it does nothing to
+    // stop this ticker from mutating MachineState during that same window, which is
+    // what actually causes duplicated fuel once the deferred sync later overwrites
+    // state with the stale, pre-tick inventory contents. shouldSkipMachine is the pure
+    // guard the runner uses to skip such a machine entirely for the tick.
+
+    @Test
+    void shouldSkipMachine_whenSyncPending_isTrue() {
+        assertTrue(MachineTicker.shouldSkipMachine(1));
+    }
+
+    @Test
+    void shouldSkipMachine_whenMultipleSyncsPending_isTrue() {
+        // Two viewers of the same shared inventory can each schedule their own
+        // deferred sync in the same tick -- the guard must stay tripped until every
+        // one of them has cleared, not just the first.
+        assertTrue(MachineTicker.shouldSkipMachine(2));
+    }
+
+    @Test
+    void shouldSkipMachine_whenNoSyncPending_isFalse() {
+        assertFalse(MachineTicker.shouldSkipMachine(0));
+    }
+
+    @Test
+    void shouldSkipMachine_negativeCountIsNeverSkip() {
+        // Defensive: a count that somehow went negative (more clears than marks) must
+        // never be read as "pending" -- that would wedge this machine out of ticking
+        // forever.
+        assertFalse(MachineTicker.shouldSkipMachine(-1));
+    }
+
+    @Test
+    void shouldSkipMachine_hasTheSamePolarityAsFurnaceGuisRefreshGuard() {
+        // Both halves of the collision (skip the mutation, skip the repaint) must
+        // trip on the exact same fact, or the two guards could disagree about whether
+        // a sync is still in flight.
+        for (int pending = -2; pending <= 3; pending++) {
+            int finalPending = pending;
+            assertEquals(finalPending > 0, MachineTicker.shouldSkipMachine(finalPending),
+                    () -> "pendingSyncCount=" + finalPending);
+        }
+    }
 }

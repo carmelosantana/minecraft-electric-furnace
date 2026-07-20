@@ -30,70 +30,54 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class MachineEffectsTest {
 
     @Nested
-    @DisplayName("shouldEmit -- the per-machine, per-run gate")
-    class ShouldEmit {
+    @DisplayName("shouldEmitSparks -- sparks follow power, whether or not there is work to do")
+    class ShouldEmitSparks {
 
         @Test
-        void emitsWhenEnabledActiveAndWatched() {
-            assertTrue(MachineEffects.shouldEmit(true, 15, 1, true));
+        void sparksFollowPower_notSmelting() {
+            assertTrue(MachineEffects.shouldEmitSparks(true, 1, true));
+            assertFalse(MachineEffects.shouldEmitSparks(true, 1, false));
         }
 
         @Test
-        void neverEmitsWhenEffectsAreDisabled() {
-            assertFalse(MachineEffects.shouldEmit(false, 15, 4, true));
+        void noNearbyPlayers_emitsNothing() {
+            assertFalse(MachineEffects.shouldEmitSparks(true, 0, true));
         }
 
         @Test
-        void neverEmitsForAnIdleMachine() {
-            // An unpowered machine is not running; sparking would be a lie as well as
-            // wasted packets.
-            assertFalse(MachineEffects.shouldEmit(true, 15, 4, false));
-        }
-
-        @Test
-        void neverEmitsWithNoNearbyPlayers() {
-            // The whole point of the radius gate: no observer, no packets. This is the
-            // case that keeps a world full of machines from costing anything.
-            assertFalse(MachineEffects.shouldEmit(true, 15, 0, true));
+        void effectsDisabled_emitsNothing() {
+            assertFalse(MachineEffects.shouldEmitSparks(false, 5, true));
         }
 
         @Test
         void aNegativeNearbyCountIsTreatedAsNone() {
-            assertFalse(MachineEffects.shouldEmit(true, 15, -1, true));
+            assertFalse(MachineEffects.shouldEmitSparks(true, -1, true));
+        }
+    }
+
+    @Nested
+    @DisplayName("shouldEmitSmoke -- smoke (and the beacon-hum sound) follow actual smelting, not mere power")
+    class ShouldEmitSmoke {
+
+        @Test
+        void smokeFollowsSmelting_notMerePower() {
+            assertTrue(MachineEffects.shouldEmitSmoke(true, 1, true));
+            assertFalse(MachineEffects.shouldEmitSmoke(true, 1, false));
         }
 
         @Test
-        void nonPositivePeriodNeverEmits() {
-            // A zero or negative period would mean "every tick or faster"; refusing to
-            // emit is safer than scheduling a hot loop.
-            assertFalse(MachineEffects.shouldEmit(true, 0, 4, true));
-            assertFalse(MachineEffects.shouldEmit(true, -5, 4, true));
-        }
-
-        // A "gateIsExhaustiveOverEveryCombination" test previously lived here, but it
-        // computed its expected value as `enabled && period > 0 && nearby > 0 &&
-        // active` -- the implementation's own expression -- so it could not fail for
-        // any change that preserved that shape; it was deleted rather than kept as a
-        // test that cannot fail. The six concrete-literal cases above (and the two
-        // below) already pin every dimension of the gate with a hand-picked
-        // input/output pair apiece.
-
-        @Test
-        void allFourGatingDimensionsMustHoldSimultaneously() {
-            // A hand-written truth table row for the one case not otherwise covered
-            // above: every gate open at once is the only combination that must emit.
-            assertTrue(MachineEffects.shouldEmit(true, 15, 3, true));
+        void noNearbyPlayers_emitsNothing() {
+            assertFalse(MachineEffects.shouldEmitSmoke(true, 0, true));
         }
 
         @Test
-        void anySingleGateClosedIsEnoughToSuppressEmission() {
-            // Four concrete rows, one per dimension, each flipping exactly one gate
-            // shut against an otherwise-fully-open baseline (enabled, period 15,
-            // 3 nearby players, active).
-            assertFalse(MachineEffects.shouldEmit(false, 15, 3, true), "enabled=false");
-            assertFalse(MachineEffects.shouldEmit(true, 0, 3, true), "period=0");
-            assertFalse(MachineEffects.shouldEmit(true, 15, 0, true), "nearby=0");
-            assertFalse(MachineEffects.shouldEmit(true, 15, 3, false), "active=false");
+        void effectsDisabled_emitsNothing() {
+            assertFalse(MachineEffects.shouldEmitSmoke(false, 5, true));
+        }
+
+        @Test
+        void aNegativeNearbyCountIsTreatedAsNone() {
+            assertFalse(MachineEffects.shouldEmitSmoke(true, -1, true));
         }
     }
 
