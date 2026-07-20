@@ -32,6 +32,8 @@ import org.xpfarm.electricfurnace.gui.FurnaceGui;
 import org.xpfarm.electricfurnace.item.MachineItemFactory;
 import org.xpfarm.electricfurnace.item.MaterialContract;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
+import org.xpfarm.electricfurnace.machine.MachineState;
+import org.xpfarm.electricfurnace.machine.MachineStore;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,7 +52,11 @@ import java.util.function.Supplier;
  * block's GUI is force-closed first -- {@link FurnaceGui#closeForBlock} synchronously
  * fires {@code InventoryCloseEvent}, so their items are already back in their
  * inventory (or dropped at their feet) before the block disappears underneath the
- * (now nonexistent) custom inventory.
+ * (now nonexistent) custom inventory. The machine's own persisted contents -- its
+ * inputs, fuel, and output, tracked separately by {@link MachineStore} from whatever
+ * a currently-open GUI is showing -- are then dropped on the ground and the store
+ * entry is forgotten, in that order: progress is forfeited, but no item is ever only
+ * in memory when the block stops existing.
  *
  * <p><b>Right-click:</b> the event is <em>always</em> cancelled for a registered
  * machine before anything else runs -- if the vanilla blast furnace GUI were also
@@ -63,10 +69,12 @@ public final class MachineBlockListener implements Listener {
     private static final String USE_PERMISSION = "electricfurnace.use";
 
     private final MachineRegistry machines;
+    private final MachineStore store;
     private final Supplier<EfConfig> configSupplier;
 
-    public MachineBlockListener(MachineRegistry machines, Supplier<EfConfig> configSupplier) {
+    public MachineBlockListener(MachineRegistry machines, MachineStore store, Supplier<EfConfig> configSupplier) {
         this.machines = Objects.requireNonNull(machines, "machines");
+        this.store = Objects.requireNonNull(store, "store");
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
     }
 
@@ -101,9 +109,36 @@ public final class MachineBlockListener implements Listener {
         // are gone -- never destroy items by breaking the block out from under an open GUI.
         FurnaceGui.closeForBlock(block);
 
+        // The machine's own persisted contents -- separate from whatever a viewer's GUI
+        // held -- must hit the ground before the store forgets them and the block stops
+        // being addressable as a machine. Progress is forfeited; items never are.
+        dropStoreContents(block);
+        store.forget(block);
+
         machines.unregister(block);
         event.setDropItems(false);
         block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+    }
+
+    /**
+     * Drops every non-null input, fuel, and output stack currently held in
+     * {@code block}'s {@link MachineStore} entry at the block's location. Called
+     * immediately before {@link MachineStore#forget}, so nothing this method skips is
+     * about to be flushed anywhere either.
+     */
+    private void dropStoreContents(Block block) {
+        MachineState state = store.get(block);
+        for (ItemStack input : state.inputs()) {
+            dropIfPresent(block, input);
+        }
+        dropIfPresent(block, state.fuel());
+        dropIfPresent(block, state.output());
+    }
+
+    private static void dropIfPresent(Block block, ItemStack stack) {
+        if (stack != null && stack.getType() != Material.AIR && stack.getAmount() > 0) {
+            block.getWorld().dropItemNaturally(block.getLocation(), stack);
+        }
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -124,8 +159,9 @@ public final class MachineBlockListener implements Listener {
      * still pointing at the now-empty location, and would drop -- subject to the
      * explosion's yield roll -- at best a plain blast furnace. Both are item loss.
      * Machines are pulled out of the block list so the explosion does not process them,
-     * then broken deliberately: viewers force-closed (returning their contents),
-     * registration removed, and the machine item dropped unconditionally.
+     * then broken deliberately: viewers force-closed (returning their contents), the
+     * store's own persisted contents dropped and forgotten, registration removed, and
+     * the machine item dropped unconditionally.
      */
     private void salvageExploded(List<Block> blockList) {
         List<Block> machineBlocks = new ArrayList<>();
@@ -141,6 +177,8 @@ public final class MachineBlockListener implements Listener {
 
         for (Block block : machineBlocks) {
             FurnaceGui.closeForBlock(block);
+            dropStoreContents(block);
+            store.forget(block);
             machines.unregister(block);
             block.setType(Material.AIR);
             block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
