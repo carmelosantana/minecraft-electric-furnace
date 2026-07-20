@@ -282,17 +282,47 @@ Evidence from the second run:
 
 ### 7b — Ten-plugin ecosystem matrix
 
-- [ ] Fresh-volume [Legendary Java Minecraft Geyser Floodgate stack](https://github.com/TheRemote/Legendary-Java-Minecraft-Geyser-Floodgate) test covers all ten updater-managed plugins.
+- [x] Fresh-volume [Legendary Java Minecraft Geyser Floodgate stack](https://github.com/TheRemote/Legendary-Java-Minecraft-Geyser-Floodgate) test covers all updater-managed plugins.
   - **Out of band, and not a prerequisite for this plugin's release.** Belongs to
     `minecraft-plugin-matrix`, triggered by an updater manifest change, a
     Paper/Geyser/Floodgate/ViaVersion bump, or explicit request — not by every `dev`
     run. Gate 7a above tested this plugin alone in an otherwise-default stack and is
     not evidence about interaction with the other nine.
-- [ ] Each updater-managed plugin's manifest `enabled` value, default state, and expected fresh-volume behavior are recorded separately.
-- [ ] Paper, Geyser, Floodgate, and ViaVersion start successfully together.
+
+- [x] Each updater-managed plugin's manifest `enabled` value, default state, and expected fresh-volume behavior are recorded separately.
+- [x] Paper, Geyser, Floodgate, and ViaVersion start successfully together.
 - [ ] Java and Bedrock smoke tests cover joins plus affected commands, events, permissions, persistence, and reloads where feasible.
-- [ ] Public deployment smoke tests verify `play.xpfarm.org` reaches the intended Java and Bedrock entry points.
-- [ ] Ollama and Umami unavailable-endpoint tests keep the server and plugins available when applicable.
+  - **Not done.** No client join was performed in this matrix run; see the 7a caveats.
+- [x] Public deployment smoke tests verify `play.xpfarm.org` reaches the intended Java and Bedrock entry points.
+  - DNS resolves to `168.231.74.113`; Java TCP 25565 and Bedrock UDP 19132 both reachable.
+- [x] Ollama and Umami unavailable-endpoint tests keep the server and plugins available when applicable.
+  - Both integrations ship `enabled: false`, so the default run only proved they stay
+    dormant. To test the real failure path they were switched on and pointed at
+    TEST-NET-2 `198.51.100.9`. Ollama caught
+    `java.net.SocketException: Network is unreachable`, retried once and stopped
+    (RetryExec count static at 2 across 45s — bounded, no loop). Umami enabled and
+    warned about its unconfigured website ID without failing. Server reached
+    `Done (12.933s)` and stayed reachable throughout. Zero credential-shaped strings
+    in any log line.
+
+
+**Run of 2026-07-19 — PASSED (11/11).** Triggered by the checksum-manifest
+remediation (ten patch re-cuts) and this plugin's enrollment in the updater
+manifest. The manifest now carries **eleven** plugins, not ten — Electric Furnace
+was added in `43f5bb7`.
+
+- Manifest state for this plugin: `enabled` absent (= true), no pin. Expected
+  fresh-volume behavior: install and enable. Observed: installed `v0.1.1`,
+  `Enabling ElectricFurnace v0.1.1` → `ElectricFurnace enabled (5 alloys,
+  effects on).` **PASS**
+- All eleven plugins installed by the one-shot updater on a fresh volume and
+  enabled together; zero SEVERE/exception lines stack-wide.
+- Stack: Paper 26.1.2, Geyser 2.11.0, Floodgate 2.2.5 b138, ViaVersion 5.11.0.
+- Each installed JAR's SHA-256 matched its published `SHA256SUMS.txt` digest.
+
+Still not covered by this run: no Java or Bedrock client join was performed, so
+the 7a caveats above stand unchanged. A passing matrix is evidence the plugins
+coexist and enable, not that this plugin's in-game behavior works.
 
 ## 8. CI/CD
 

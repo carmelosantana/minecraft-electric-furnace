@@ -208,7 +208,17 @@ machine:
 
 - [ ] **Step 7: Fix every existing compile break**
 
-`fuelPerOperation()` is referenced in `FurnaceGui.java` (lines ~189, 220, 234) and in existing tests. For now, replace those call sites with the literal `1` so the project compiles — Task 5 removes them entirely when the GUI stops processing. Update `ConfigValidatorTest` occurrences of `machine.smelt-speed-multiplier` whose default is `2.0` to `2.5`.
+`fuelPerOperation()` is referenced in `FurnaceGui.java` (lines ~189, 220, 234). Under the new model there is no per-operation quantity — a machine has fuel if its fuel slot holds *any* redstone, and burn time is bought one dust at a time. Change `hasSufficientFuel` to express exactly that, and drop the now-unused parameter:
+
+```java
+/** Whether the fuel slot holds redstone at all. One dust buys burn time; there is no per-operation quantity. */
+private static boolean hasFuel(Inventory inventory) {
+    ItemStack fuel = inventory.getItem(GuiLayout.FUEL_SLOT);
+    return fuel != null && fuel.getType() == Material.REDSTONE && fuel.getAmount() > 0;
+}
+```
+
+Update the three call sites to `hasFuel(inventory)`. Update `ConfigValidatorTest` occurrences of `machine.smelt-speed-multiplier` whose default is `2.0` to `2.5`.
 
 - [ ] **Step 8: Full build**
 
