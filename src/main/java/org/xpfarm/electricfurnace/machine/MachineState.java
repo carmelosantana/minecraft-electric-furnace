@@ -43,12 +43,19 @@ import java.util.Objects;
  *
  * <h2>Slots are read and written, never aliased</h2>
  *
- * <p>{@link Inventory#getItem} is treated as returning a <em>snapshot</em>. The Bukkit
- * API does not specify whether it returns a live reference or a copy -- CraftBukkit
- * happens to return a fresh wrapper around the live stack, but nothing in the API
- * promises that, and code that mutates the returned stack and never writes it back is
- * correct only by implementation accident. Every mutation here and in
- * {@link MachineTicker} is therefore read-modify-{@link Inventory#setItem write-back}.
+ * <p>{@link #inputs()}, {@link #fuel()} and {@link #output()} return <em>detached
+ * copies</em>. Every mutation is therefore read-modify-{@link Inventory#setItem
+ * write-back}, here and in {@link MachineTicker}.
+ *
+ * <p>That is enforced rather than agreed. {@link Inventory#getItem} is unspecified as to
+ * liveness: CraftBukkit happens to return a fresh wrapper around the live stack, so a
+ * mutation reaches the slot, but nothing in the API promises it and another
+ * implementation may hand back a copy. Returning that stack directly would leave a rule
+ * that only conventions uphold, whose violation works on one server and silently loses
+ * the mutation on another -- the kind of contract that rots, because nothing fails when
+ * it is broken. Cloning deletes the live case: a caller that mutates a returned stack
+ * and forgets to write it back provably cannot have touched the slot, anywhere. See
+ * {@code snapshotOf}.
  *
  * <p>The same rule is why {@link RecipeCache} can no longer fingerprint slots by stack
  * identity: a fresh object per {@code getItem} call would make an identity comparison
@@ -130,14 +137,16 @@ public final class MachineState implements InventoryHolder {
      * A snapshot of the five input slots, in slot order. Entries are {@code null} for an
      * empty slot; length is always {@link #INPUT_COUNT}.
      *
-     * <p>A snapshot, <b>not</b> a live array: writing into the returned array changes
-     * nothing. Use {@link #setInput} to change a slot.
+     * <p>A snapshot, <b>not</b> a live array, and the stacks in it are detached copies:
+     * neither writing into the array nor mutating a stack it holds changes any slot. Use
+     * {@link #setInput} to change one. See {@code snapshotOf} for why this is a copy
+     * rather than a promise.
      */
     public ItemStack[] inputs() {
         ItemStack[] snapshot = new ItemStack[INPUT_COUNT];
         Inventory contents = getInventory();
         for (int i = 0; i < INPUT_COUNT; i++) {
-            snapshot[i] = normalizeAir(contents.getItem(INPUT_SLOTS_ORDERED[i]));
+            snapshot[i] = snapshotOf(contents.getItem(INPUT_SLOTS_ORDERED[i]));
         }
         return snapshot;
     }
@@ -150,16 +159,24 @@ public final class MachineState implements InventoryHolder {
         getInventory().setItem(INPUT_SLOTS_ORDERED[index], item);
     }
 
+    /**
+     * The fuel slot's contents, or {@code null} when empty. A detached copy -- see
+     * {@link #snapshotOf}; mutate and {@link #setFuel} it back.
+     */
     public ItemStack fuel() {
-        return normalizeAir(getInventory().getItem(GuiLayout.FUEL_SLOT));
+        return snapshotOf(getInventory().getItem(GuiLayout.FUEL_SLOT));
     }
 
     public void setFuel(ItemStack fuel) {
         getInventory().setItem(GuiLayout.FUEL_SLOT, fuel);
     }
 
+    /**
+     * The output slot's contents, or {@code null} when empty. A detached copy -- see
+     * {@link #snapshotOf}; mutate and {@link #setOutput} it back.
+     */
     public ItemStack output() {
-        return normalizeAir(getInventory().getItem(GuiLayout.OUTPUT_SLOT));
+        return snapshotOf(getInventory().getItem(GuiLayout.OUTPUT_SLOT));
     }
 
     public void setOutput(ItemStack output) {
@@ -198,5 +215,32 @@ public final class MachineState implements InventoryHolder {
      */
     static ItemStack normalizeAir(ItemStack item) {
         return (item == null || item.getType() == Material.AIR) ? null : item;
+    }
+
+    /**
+     * One slot read: normalized to {@code null} when empty, and <b>detached from the
+     * inventory</b> when not.
+     *
+     * <p>This is what makes the read-modify-write-back rule structural instead of
+     * conventional. {@link Inventory#getItem} is unspecified as to liveness -- CraftBukkit
+     * happens to return a fresh wrapper around the live stack, so a mutation reaches the
+     * slot, but nothing in the API promises that and a different implementation may hand
+     * back a copy. Code written against the accidental behaviour works or does not
+     * depending on which one you are running, which is the worst possible failure mode:
+     * a mutation that silently reaches nothing on someone else's server.
+     *
+     * <p>Cloning removes the ambiguity by removing the live case. A caller that mutates
+     * what {@link #inputs()}, {@link #fuel()} or {@link #output()} returned and forgets to
+     * {@code set} it back now <em>provably</em> cannot have changed the slot, on every
+     * implementation. The bug becomes a visibly lost mutation rather than something that
+     * reproduces on one server and not another.
+     *
+     * <p>The cost is one {@code ItemStack} copy per occupied slot per read;
+     * {@link #inputs()} is read once per machine per tick, far below the recipe
+     * resolution {@link RecipeCache} exists to avoid.
+     */
+    private static ItemStack snapshotOf(ItemStack item) {
+        ItemStack present = normalizeAir(item);
+        return present == null ? null : present.clone();
     }
 }
