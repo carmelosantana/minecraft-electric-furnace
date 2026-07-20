@@ -39,15 +39,20 @@ import java.util.logging.Logger;
  * panes and status indicator, and moving items safely in and out -- never destroying
  * them.
  *
- * <p><b>The GUI is a shared view onto persistent machine state, not its owner.</b>
- * {@link #open} binds a single {@code Inventory} per machine block, populated from that
- * block's {@link MachineState} (held by {@link MachineStore}) and reused for every later
- * viewer, so two players watching the same machine see identical contents update live.
- * The items belong to the machine, so a normal close does not drain them back to the
- * player: {@link #syncToState} folds the inventory into the machine's persisted state
- * instead. {@link #returnAllItems} is reserved for the two cases where there is no
- * machine left to hold them -- {@link #closeForBlock} (the block is about to be broken)
- * and {@link #closeAll} (shutdown, and only when the state could not be persisted).
+ * <p><b>The GUI does not own the items; it does not even hold them.</b> A machine's
+ * {@link MachineState} <em>is</em> the inventory's {@link InventoryHolder}, and the
+ * inventory it owns is this machine's only item storage. {@link #open} hands that exact
+ * instance to the player, so two players watching one machine are editing one object,
+ * and so is {@code MachineTicker}. Nothing is copied anywhere and nothing needs syncing
+ * back: a click writes the same slots the ticker reads and {@code MachineStateCodec}
+ * encodes. A normal close therefore does nothing at all to the items.
+ *
+ * <p>This class contributes exactly two things to that inventory -- the filler panes and
+ * the status indicator (see {@link #paintDecoration} and {@link #refreshIndicator}) --
+ * neither of which is machine contents and neither of which is ever persisted.
+ * {@link #returnAllItems} is reserved for the two cases where there is no machine left to
+ * hold the items: {@link #closeForBlock} (the block is about to be broken) and
+ * {@link #closeAll} (shutdown, and only when the state could not be persisted).
  *
  * <p>The status-indicator decision ({@link #indicatorStateOf}) is a pure function over
  * primitives -- no {@code org.bukkit} type -- so {@code FurnaceGuiTest} exercises every
@@ -60,12 +65,6 @@ import java.util.logging.Logger;
 public final class FurnaceGui {
 
     private static final Logger LOGGER = Logger.getLogger("ElectricFurnace");
-
-    /** The five recycler input slots, in the same order as {@link MachineState#inputs()}. */
-    private static final int[] INPUT_SLOTS_ORDERED = {
-            GuiLayout.INPUT_SLOT_1, GuiLayout.INPUT_SLOT_2, GuiLayout.INPUT_SLOT_3,
-            GuiLayout.INPUT_SLOT_4, GuiLayout.INPUT_SLOT_5
-    };
 
     private FurnaceGui() {
     }
@@ -111,62 +110,32 @@ public final class FurnaceGui {
     // Bukkit-facing glue
     // =================================================================================
 
-    /** Marks a custom inventory as belonging to one specific Electric Furnace block. */
-    public static final class Holder implements InventoryHolder {
-        private final Block block;
-        private Inventory inventory;
-
-        /**
-         * How many {@code MachineGuiListener#scheduleSync} deferred callbacks are
-         * currently in flight for this block's shared inventory. A plain {@code int},
-         * not a {@code boolean}: the same shared inventory can have more than one
-         * viewer, and each viewer's click schedules its own independent one-tick
-         * deferral, so a count (not a flag one callback could clear out from under
-         * another) is what keeps {@link #refreshFromState}'s guard correct. Read and
-         * written only on the Bukkit main thread, same as every other mutable field on
-         * this class.
-         */
-        private int pendingSyncCount;
-
-        private Holder(Block block) {
-            this.block = Objects.requireNonNull(block, "block");
-        }
-
-        /** The Electric Furnace block this GUI instance belongs to. */
-        public Block block() {
-            return block;
-        }
-
-        @Override
-        public Inventory getInventory() {
-            return inventory;
-        }
-    }
-
     /** Whether {@code inventory} is an Electric Furnace GUI. */
     public static boolean isFurnaceGui(Inventory inventory) {
-        return inventory != null && inventory.getHolder() instanceof Holder;
+        return inventory != null && inventory.getHolder() instanceof MachineState;
     }
 
-    /** The block a given Electric Furnace GUI inventory belongs to, if it is one. */
-    public static Optional<Block> blockOf(Inventory inventory) {
-        if (inventory != null && inventory.getHolder() instanceof Holder holder) {
-            return Optional.of(holder.block());
+    /** The machine whose contents {@code inventory} holds, if it is a furnace GUI. */
+    public static Optional<MachineState> stateOf(Inventory inventory) {
+        if (inventory != null && inventory.getHolder() instanceof MachineState state) {
+            return Optional.of(state);
         }
         return Optional.empty();
     }
 
+    /** The block a given Electric Furnace GUI inventory belongs to, if it is one. */
+    public static Optional<Block> blockOf(Inventory inventory) {
+        return stateOf(inventory).map(MachineState::block);
+    }
+
     /**
-     * Opens {@code block}'s Electric Furnace GUI for {@code player}, binding a single
-     * shared {@code Inventory} per machine.
+     * Opens {@code block}'s Electric Furnace GUI for {@code player}.
      *
-     * <p>If another player already has this block's GUI open, {@code player} is handed
-     * that exact same {@code Inventory} instance -- found by scanning online players'
-     * currently-open top inventories, the same technique {@link #closeForBlock} and
-     * {@code RedstoneListener} already use to find viewers of a block, so no extra
-     * cache is needed and nothing can go stale when a machine is broken or its chunk
-     * unloads. Otherwise a new inventory is built and its slots populated directly from
-     * {@code state}'s arrays.
+     * <p>There is nothing to build and nothing to populate: {@code state} already owns
+     * the inventory that holds its items, so this paints the decoration onto it and hands
+     * that same instance over. A second viewer of the same machine is handed the same
+     * object again -- which is why no viewer registry, and no scan of online players to
+     * find an existing view, is needed to keep two viewers consistent.
      */
     public static Inventory open(Player player, Block block, EfConfig config, boolean powered, MachineState state) {
         Objects.requireNonNull(player, "player");
@@ -174,211 +143,51 @@ public final class FurnaceGui {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(state, "state");
 
-        Inventory inventory = findOpenInventory(block).orElseGet(() -> buildInventory(block, state));
-
-        refreshIndicator(inventory, config, powered, !state.isIdle(), state.progressTicks(), config.machine().smeltTicks());
+        Inventory inventory = state.getInventory();
+        paintDecoration(inventory);
+        refreshIndicator(inventory, config, powered, !state.isIdle(), state.progressTicks(),
+                config.machine().smeltTicks());
 
         player.openInventory(inventory);
         return inventory;
     }
 
     /**
-     * The currently-open shared GUI inventory for {@code block}, if any online player
-     * has it open. Public because {@code MachineStore#flush} also calls this, to fold
-     * a currently-open GUI's edits into state right before encoding it -- see the note
-     * there on the deferred-sync window this closes.
+     * Draws the non-interactive filler panes into every slot that has no functional role.
+     *
+     * <p>Idempotent, and deliberately called on every {@link #open} rather than once at
+     * inventory creation: the panes are decoration, not contents, so they are never
+     * persisted by {@code MachineStateCodec} and are therefore absent from a machine
+     * freshly hydrated from disk. Painting them at open is what makes "not persisted"
+     * invisible to a player.
      */
-    public static Optional<Inventory> findOpenInventory(Block block) {
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            Inventory top = viewer.getOpenInventory().getTopInventory();
-            if (blockOf(top).filter(block::equals).isPresent()) {
-                return Optional.of(top);
+    private static void paintDecoration(Inventory inventory) {
+        for (int slot = 0; slot < GuiLayout.SIZE; slot++) {
+            if (GuiLayout.roleOf(slot) == GuiLayout.SlotRole.FILLER) {
+                inventory.setItem(slot, buildFillerItem());
             }
         }
-        return Optional.empty();
     }
 
     /**
      * Every currently-open Electric Furnace GUI, keyed by the block it belongs to, from
      * a single pass over the online players.
      *
-     * <p>For callers that need to look up more than one block. {@link #findOpenInventory}
-     * costs one full online-player scan per block, so a per-tick driver asking about
-     * every live machine would pay machines &times; players every tick -- almost always
-     * to discover that no GUI is open at all. This inverts that: one scan per pass,
-     * over the near-always-tiny set of open GUIs, regardless of how many machines exist.
-     * Two viewers of the same machine share one {@code Inventory}, so the map has one
-     * entry per machine, not per viewer.
+     * <p>{@code MachineTicker} uses this to decide which machines have a viewer worth
+     * repainting the status indicator for. {@link #open} does not need it -- a machine's
+     * inventory is reachable directly from its {@link MachineState} -- so this is a
+     * rendering optimisation only, never a correctness dependency. Two viewers of the
+     * same machine share one {@code Inventory}, so the map has one entry per machine.
      */
     public static Map<Block, Inventory> openInventoriesByBlock() {
         Map<Block, Inventory> open = new HashMap<>();
         for (Player viewer : Bukkit.getOnlinePlayers()) {
             Inventory top = viewer.getOpenInventory().getTopInventory();
-            if (top != null && top.getHolder() instanceof Holder holder) {
-                open.putIfAbsent(holder.block(), top);
+            if (top != null && top.getHolder() instanceof MachineState state) {
+                open.putIfAbsent(state.block(), top);
             }
         }
         return open;
-    }
-
-    private static Inventory buildInventory(Block block, MachineState state) {
-        Holder holder = new Holder(block);
-        Inventory inventory = Bukkit.createInventory(holder, GuiLayout.SIZE, Component.text(GuiLayout.TITLE_TEXT));
-        holder.inventory = inventory;
-
-        for (int slot = 0; slot < GuiLayout.SIZE; slot++) {
-            if (GuiLayout.roleOf(slot) == GuiLayout.SlotRole.FILLER) {
-                inventory.setItem(slot, buildFillerItem());
-            }
-        }
-        populateFromState(inventory, state);
-        return inventory;
-    }
-
-    /** Mirrors {@code state}'s input/fuel/output arrays into a freshly built inventory's slots. */
-    private static void populateFromState(Inventory inventory, MachineState state) {
-        ItemStack[] inputs = state.inputs();
-        for (int i = 0; i < INPUT_SLOTS_ORDERED.length && i < inputs.length; i++) {
-            inventory.setItem(INPUT_SLOTS_ORDERED[i], inputs[i]);
-        }
-        inventory.setItem(GuiLayout.FUEL_SLOT, state.fuel());
-        inventory.setItem(GuiLayout.OUTPUT_SLOT, state.output());
-    }
-
-    /**
-     * The inverse of {@link #populateFromState}: copies {@code inventory}'s current
-     * input/fuel/output slots back into {@code state}'s fields.
-     *
-     * <p>This is the one method standing between "items placed in an open GUI" and
-     * "items the machine's persisted state actually knows about." {@code MachineStore}
-     * persists only what is in a {@code MachineState}'s fields; it has no idea a GUI
-     * inventory exists. Every place this class or {@code MachineGuiListener} lets go of
-     * an inventory a player might have edited -- a click, a drag, a close, a shutdown --
-     * calls this first, so a flush that happens to land in between never serializes
-     * stale, pre-edit contents.
-     */
-    public static void syncToState(Inventory inventory, MachineState state) {
-        Objects.requireNonNull(inventory, "inventory");
-        Objects.requireNonNull(state, "state");
-
-        ItemStack[] inputs = state.inputs();
-        for (int i = 0; i < INPUT_SLOTS_ORDERED.length && i < inputs.length; i++) {
-            inputs[i] = normalizeAir(inventory.getItem(INPUT_SLOTS_ORDERED[i]));
-        }
-        state.setFuel(normalizeAir(inventory.getItem(GuiLayout.FUEL_SLOT)));
-        state.setOutput(normalizeAir(inventory.getItem(GuiLayout.OUTPUT_SLOT)));
-    }
-
-    /** Bukkit slots report an empty stack as either {@code null} or {@code AIR} depending on the path taken; normalize to {@code null}. */
-    private static ItemStack normalizeAir(ItemStack item) {
-        return (item == null || item.getType() == Material.AIR) ? null : item;
-    }
-
-    /**
-     * Marks one {@code MachineGuiListener#scheduleSync} deferred callback as in flight
-     * for {@code inventory}'s machine. Call synchronously, in the same tick as the
-     * click or drag that produced the deferral -- <em>before</em> the one-tick delay,
-     * not from inside it -- so {@link #refreshFromState} is guaranteed to see the
-     * marker the instant a driver could possibly run ahead of the deferred callback
-     * (a repeating task registered at {@code onEnable} has a lower task id than a
-     * one-shot scheduled afterward, so it runs first when both are due the same tick).
-     * A no-op if {@code inventory} is not a furnace GUI. Paired with
-     * {@link #clearPendingSync}.
-     */
-    public static void markPendingSync(Inventory inventory) {
-        if (inventory != null && inventory.getHolder() instanceof Holder holder) {
-            holder.pendingSyncCount++;
-        }
-    }
-
-    /**
-     * The other half of {@link #markPendingSync}: call from inside the deferred
-     * callback once it has run, in a {@code finally} so an early return (e.g. the
-     * block stopped being a machine before the callback fired) still clears it -- a
-     * count that never returns to zero would wedge {@link #refreshFromState} into
-     * skipping this machine forever. A no-op if {@code inventory} is not a furnace GUI.
-     */
-    public static void clearPendingSync(Inventory inventory) {
-        if (inventory != null && inventory.getHolder() instanceof Holder holder && holder.pendingSyncCount > 0) {
-            holder.pendingSyncCount--;
-        }
-    }
-
-    /**
-     * Pure guard for {@link #refreshFromState}: whether a pending-sync count means a
-     * {@code MachineGuiListener#scheduleSync} deferred callback for this machine has
-     * not run yet. Extracted from {@code refreshFromState} itself -- which cannot be
-     * constructed headlessly, since it takes a real {@code Inventory} -- so the
-     * polarity of the decision is pinned by a server-less test: a positive count must
-     * skip, never run.
-     */
-    static boolean shouldSkipRefresh(int pendingSyncCount) {
-        return pendingSyncCount > 0;
-    }
-
-    /**
-     * How many {@code MachineGuiListener#scheduleSync} deferred callbacks are
-     * currently in flight for {@code block}'s shared inventory, or {@code 0} if no
-     * online player currently has that block's GUI open.
-     *
-     * <p>{@code MachineTicker}'s runner reads this -- together with the pure
-     * {@code MachineTicker#shouldSkipMachine} -- to skip a machine <b>entirely</b> for
-     * a tick, not merely skip repainting its GUI, while a deferred sync is still in
-     * flight for it. See {@link #shouldSkipRefresh}'s note on the collision this two-
-     * part guard closes: that guard alone stops a stale repaint, but does nothing to
-     * stop a driver from mutating {@link MachineState} itself during the same window,
-     * which is what actually causes duplicated fuel once the deferred sync later
-     * overwrites state with the (stale, pre-tick) inventory contents.
-     */
-    public static int pendingSyncCount(Block block) {
-        Objects.requireNonNull(block, "block");
-        return findOpenInventory(block).map(FurnaceGui::pendingSyncCount).orElse(0);
-    }
-
-    /**
-     * The same count as {@link #pendingSyncCount(Block)}, for a caller that has already
-     * resolved the block's open GUI (or established that there is none, passing
-     * {@code null}) and must not pay another online-player scan to find it again.
-     */
-    public static int pendingSyncCount(Inventory inventory) {
-        if (inventory != null && inventory.getHolder() instanceof Holder holder) {
-            return holder.pendingSyncCount;
-        }
-        return 0;
-    }
-
-    /**
-     * The inverse direction from {@link #syncToState}: pushes {@code state}'s current
-     * input/fuel/output arrays into {@code inventory}'s slots, then redraws the status
-     * indicator -- unless a deferred GUI-&gt;state sync is still in flight for this
-     * machine, in which case this call is skipped entirely.
-     *
-     * <p>Called by {@code MachineTicker} when it mutates a machine's
-     * {@link MachineState} -- consuming inputs, producing output -- while a viewer has
-     * that block's GUI open, so the open GUI does not keep showing pre-tick contents.
-     *
-     * <p><b>Why the guard.</b> {@code MachineGuiListener#scheduleSync} defers folding a
-     * click's item movement into {@code state} by one tick, because Bukkit only finishes
-     * applying the move after its own event handler returns. Repainting inside that
-     * window would overwrite an item the player just placed -- already gone from their
-     * inventory, not yet folded into {@code state} -- with state's stale arrays, and the
-     * deferred sync would then copy that clobbered inventory back over state, leaving
-     * the item nowhere. Skipping resumes on the next tick, once
-     * {@link #clearPendingSync} has run.
-     */
-    public static void refreshFromState(Inventory inventory, MachineState state, EfConfig config, boolean powered) {
-        Objects.requireNonNull(inventory, "inventory");
-        Objects.requireNonNull(state, "state");
-        Objects.requireNonNull(config, "config");
-
-        int pendingSyncCount = inventory.getHolder() instanceof Holder holder ? holder.pendingSyncCount : 0;
-        if (shouldSkipRefresh(pendingSyncCount)) {
-            return;
-        }
-
-        populateFromState(inventory, state);
-        refreshIndicator(inventory, config, powered, !state.isIdle(), state.progressTicks(),
-                config.machine().smeltTicks());
     }
 
     /**
@@ -494,6 +303,13 @@ public final class FurnaceGui {
             return 0;
         }
         existing.setAmount(existing.getAmount() + move);
+        // Write the grown stack back explicitly. Mutating what getItem returned happens
+        // to reach the real slot on CraftBukkit, which returns a wrapper around the live
+        // stack, but the Bukkit API promises no such thing -- and this inventory is now
+        // the machine's only copy of these items, so "correct by implementation accident"
+        // is not good enough here. On an implementation that hands back a copy, the line
+        // above alone would silently consume from the player's stack and add nothing.
+        inventory.setItem(slot, existing);
         source.setAmount(source.getAmount() - move);
         return move;
     }
@@ -507,8 +323,8 @@ public final class FurnaceGui {
      *
      * <p>Reserved for the two cases where there is no machine state left to hold the
      * items: {@link #closeForBlock} (the block is being broken) and {@link #closeAll}
-     * (shutdown, only when persisting failed). A normal close does not call this --
-     * see {@link #syncToState}.
+     * (shutdown, only when persisting failed). A normal close does not call this: the
+     * items are already in the machine's own storage and simply stay there.
      *
      * <p><b>Gives before clearing, per slot -- do not reorder.</b> If {@link #giveOrDrop}
      * -&gt; {@code dropItemNaturally} throws, which it can during world teardown, the
@@ -546,9 +362,8 @@ public final class FurnaceGui {
      * Furnace GUI, returning their items directly first.
      *
      * <p>The block is about to stop existing, so there is no machine left for these
-     * items to belong to -- unlike a normal close, which folds the inventory into the
-     * machine's state (see {@link #syncToState}), this returns them straight to the
-     * viewer. Items are returned <em>before</em> {@link Player#closeInventory()} is
+     * items to belong to -- unlike a normal close, which leaves them in the machine's own
+     * storage, this returns them straight to the viewer. Items are returned <em>before</em> {@link Player#closeInventory()} is
      * called, exactly like {@link #closeAll} already does.
      *
      * <p><b>Does not depend on {@code InventoryCloseEvent}.</b> If any viewer's items
@@ -569,7 +384,7 @@ public final class FurnaceGui {
         boolean returnedAny = false;
         for (Player player : Bukkit.getOnlinePlayers()) {
             Inventory top = player.getOpenInventory().getTopInventory();
-            if (top.getHolder() instanceof Holder holder && holder.block().equals(block)) {
+            if (top.getHolder() instanceof MachineState state && state.block().equals(block)) {
                 returnAllItems(top, player);
                 player.closeInventory();
                 returnedAny = true;
@@ -652,10 +467,10 @@ public final class FurnaceGui {
     public static void closeAll(MachineStore store) {
         for (Player player : Bukkit.getOnlinePlayers()) {
             Inventory top = player.getOpenInventory().getTopInventory();
-            if (!(top.getHolder() instanceof Holder holder)) {
+            if (!(top.getHolder() instanceof MachineState state)) {
                 continue;
             }
-            Block block = holder.block();
+            Block block = state.block();
             // Per-viewer try/catch: persist() already swallows its own failures, but
             // store.forget (whose block.getState() call is not itself guarded -- see
             // MachineStore#forget) and returnAllItems -> dropItemNaturally can both
@@ -665,7 +480,7 @@ public final class FurnaceGui {
             // (PDC already cleared, inventory never handed over). Logging and moving on
             // keeps one bad viewer from stranding the rest.
             try {
-                boolean persisted = persist(top, block, store);
+                boolean persisted = persist(block, store);
                 for (CloseAllStep step : closeAllSteps(persisted)) {
                     switch (step) {
                         case PERSIST -> {
@@ -690,8 +505,14 @@ public final class FurnaceGui {
         }
     }
 
-    /** Attempts to sync {@code inventory} into its machine's state and flush that state to disk. */
-    private static boolean persist(Inventory inventory, Block block, MachineStore store) {
+    /**
+     * Attempts to flush {@code block}'s machine state to its PDC.
+     *
+     * <p>There is no "sync the inventory into state" step any more, and none is missing:
+     * the inventory <em>is</em> the state's storage, so whatever the viewer last did to
+     * it is already what {@code MachineStateCodec} will encode.
+     */
+    private static boolean persist(Block block, MachineStore store) {
         // store can be null here even though FurnaceGui itself never stores it: this is
         // a static utility, and ElectricFurnacePlugin#onDisable calls closeAll(store)
         // unconditionally -- including when the "machine store" wiring step in onEnable
@@ -702,7 +523,6 @@ public final class FurnaceGui {
             return false;
         }
         try {
-            syncToState(inventory, store.get(block));
             store.flush(block);
             return true;
         } catch (Throwable t) {
