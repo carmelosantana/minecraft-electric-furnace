@@ -337,10 +337,10 @@ public final class MachineTicker {
         ItemStack candidateOutput = state.recipeCache().candidate();
 
         boolean outputBlocked = recipeValid
-                && FurnaceGui.classifyOutputSlot(state.output(), candidateOutput)
-                        == FurnaceGui.OutputSlotState.DIFFERENT_ITEM;
+                && MachineRules.classifyOutputSlot(state.output(), candidateOutput)
+                        == MachineRules.OutputSlotState.DIFFERENT_ITEM;
 
-        boolean fuelAvailable = FurnaceGui.hasFuel(state.fuel());
+        boolean fuelAvailable = MachineRules.hasFuel(state.fuel());
 
         Conditions conditions = new Conditions(powered, requireSignal, recipeValid, outputBlocked, fuelAvailable);
         Step stepResult = step(conditions, state.progressTicks(), state.burnTicksRemaining(),

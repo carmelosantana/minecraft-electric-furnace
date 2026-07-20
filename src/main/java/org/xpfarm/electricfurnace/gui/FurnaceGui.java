@@ -20,6 +20,7 @@ import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.xpfarm.electricfurnace.config.EfConfig;
+import org.xpfarm.electricfurnace.machine.MachineRules;
 import org.xpfarm.electricfurnace.machine.MachineState;
 import org.xpfarm.electricfurnace.machine.MachineStore;
 
@@ -51,16 +52,13 @@ import java.util.logging.Logger;
  * (the block is about to be broken) and {@link #closeAll} (shutdown, and only for a
  * machine whose state could not be persisted).
  *
- * <p>The status-indicator decision ({@link #indicatorStateOf}) and the output-slot
- * classification ({@link #classifyOutputSlot}) are pure functions over
- * primitives/enums -- no {@code org.bukkit} type -- so {@code FurnaceGuiTest}
- * exercises every combination with no running server, following the same pattern as
- * {@code MetalClassifier.resolveBranch}. Recipe resolution itself (what used to be
- * {@code tryProcess}, gated by a {@code mayRun}-style processing check) has moved to
- * {@code MachineTicker}, which advances every loaded machine on its own schedule
- * instead of once per GUI click -- {@code MachineTicker.Conditions} and
- * {@code MachineTicker#step} are that ticker's own equivalent decision, not a caller
- * of anything in this class.
+ * <p>The status-indicator decision ({@link #indicatorStateOf}) is a pure function over
+ * primitives -- no {@code org.bukkit} type -- so {@code FurnaceGuiTest} exercises every
+ * combination with no running server. What counts as fuel and whether the output slot
+ * can accept a result are machine rules, not view logic, and live in
+ * {@link MachineRules}; recipe resolution and the run itself belong to
+ * {@code MachineTicker}. This class renders their consequences and moves items; it
+ * decides none of them.
  */
 public final class FurnaceGui {
 
@@ -110,16 +108,6 @@ public final class FurnaceGui {
             return IndicatorState.SMELTING;
         }
         return IndicatorState.RUNNING;
-    }
-
-    /** What the output slot currently holds, relative to the item an operation would produce. */
-    public enum OutputSlotState {
-        /** The output slot is empty. */
-        EMPTY,
-        /** The output slot holds an item that matches what would be produced, with room to merge. */
-        SAME_ITEM,
-        /** The output slot holds something else -- or the same item with no room left -- blocking the run. */
-        DIFFERENT_ITEM
     }
 
     // =================================================================================
@@ -423,51 +411,9 @@ public final class FurnaceGui {
         inventory.setItem(GuiLayout.INDICATOR_SLOT, indicatorItem(state, progressTicks, smeltTicks));
     }
 
-    /** Whether the fuel slot holds redstone at all. One dust buys burn time; there is no per-operation quantity. */
+    /** Whether the fuel slot holds redstone at all -- see {@link MachineRules#hasFuel}. */
     private static boolean hasFuel(Inventory inventory) {
-        return hasFuel(inventory.getItem(GuiLayout.FUEL_SLOT));
-    }
-
-    /**
-     * Whether {@code fuel} counts as fuel at all: any amount of redstone. One dust buys
-     * burn time; there is no per-operation quantity. Public so {@code MachineTicker}'s
-     * runner shares this exact definition for its {@code Conditions.fuelAvailable}
-     * rather than reimplementing it against a {@link MachineState} field instead of an
-     * {@link Inventory} slot.
-     */
-    public static boolean hasFuel(ItemStack fuel) {
-        return fuel != null && fuel.getType() == Material.REDSTONE && fuel.getAmount() > 0;
-    }
-
-    /**
-     * Compares the output slot's current contents against what an operation would
-     * produce. Blocks the run (returns {@link OutputSlotState#DIFFERENT_ITEM}) not
-     * only when a genuinely different item occupies the slot, but also when merging
-     * would exceed the max stack size -- an overflowing stack is exactly the kind of
-     * silent corruption this plugin must never cause.
-     *
-     * <p>Public for {@code MachineTicker}'s driver, which needs this exact
-     * classification every tick to decide {@code Conditions.outputBlocked} and there
-     * is no reason to make it reinvent it.
-     */
-    public static OutputSlotState classifyOutputSlot(ItemStack current, ItemStack candidate) {
-        if (current == null || current.getType() == Material.AIR) {
-            if (candidate == null) {
-                return OutputSlotState.DIFFERENT_ITEM;
-            }
-            // An empty slot is only usable if the candidate itself fits in one stack.
-            if (candidate.getAmount() > candidate.getMaxStackSize()) {
-                return OutputSlotState.DIFFERENT_ITEM;
-            }
-            return OutputSlotState.EMPTY;
-        }
-        if (candidate == null || !current.isSimilar(candidate)) {
-            return OutputSlotState.DIFFERENT_ITEM;
-        }
-        if (current.getAmount() + candidate.getAmount() > current.getMaxStackSize()) {
-            return OutputSlotState.DIFFERENT_ITEM;
-        }
-        return OutputSlotState.SAME_ITEM;
+        return MachineRules.hasFuel(inventory.getItem(GuiLayout.FUEL_SLOT));
     }
 
     // ---- Shift-click routing (see MachineGuiListener's shift-click note) ------------
