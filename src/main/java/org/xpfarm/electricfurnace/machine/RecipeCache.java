@@ -84,20 +84,61 @@ final class RecipeCache {
         for (int i = 0; i < stacks.length; i++) {
             ItemStack current = i < inputs.length ? inputs[i] : null;
             ItemStack stored = stacks[i];
-            if (current == null || stored == null) {
-                if (current != stored) {
-                    return false;
-                }
-                continue;
-            }
-            if (current.getType() != materials[i] || current.getAmount() != amounts[i]) {
-                return false;
-            }
-            if (!stored.isSimilar(current)) {
+
+            // isSimilar is evaluated only for a slot that already matches on both cheap
+            // tests -- the && chain is what preserves the cheapest-test-first ordering
+            // now that the decision itself lives in slotMatches. When either side is
+            // empty, `similar` is false and unused: slotMatches settles those cases on
+            // the material nullity alone.
+            boolean similar = current != null && stored != null
+                    && current.getType() == materials[i]
+                    && current.getAmount() == amounts[i]
+                    && stored.isSimilar(current);
+
+            if (!slotMatches(materials[i], amounts[i],
+                    current == null ? null : current.getType(),
+                    current == null ? 0 : current.getAmount(),
+                    similar)) {
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * The per-slot half of {@link #isValidFor}, as a pure function of values so it can be
+     * truth-tabled without a running server.
+     *
+     * <p>Split out deliberately. Every input this class's tests can build headlessly is
+     * an empty slot, so the whole-object {@code isValidFor} could only ever exercise its
+     * "both sides empty" branch: deleting the material/amount comparison <em>and</em> the
+     * {@code isSimilar} comparison left the entire suite green. The failure that hides
+     * behind that is not a slow cache, it is a wrong one -- a fingerprint that never
+     * notices an input change keeps a machine smelting a recipe its inputs no longer
+     * contain, and deposits the wrong item. Stated over {@link Material} (an enum),
+     * {@code int}, and {@code boolean}, the decision is testable; {@link #isValidFor}
+     * delegates so the tested function is the one that ships.
+     *
+     * @param storedMaterial  the material fingerprinted at {@code store} time, or
+     *                        {@code null} if that slot was empty
+     * @param storedAmount    the amount fingerprinted at {@code store} time
+     * @param currentMaterial the material in the slot now, or {@code null} if empty
+     * @param currentAmount   the amount in the slot now
+     * @param similar         whether the stored clone {@link ItemStack#isSimilar} the
+     *                        current stack -- metadata included. Same material and amount
+     *                        is <em>not</em> sufficient: a plain iron sword and one another
+     *                        plugin has tagged in its PDC are indistinguishable on the
+     *                        cheap tests, and {@code MetalClassifier} resolves them to
+     *                        different metals.
+     * @return whether the slot's contribution to the fingerprint is unchanged
+     */
+    static boolean slotMatches(Material storedMaterial, int storedAmount,
+                               Material currentMaterial, int currentAmount, boolean similar) {
+        if (storedMaterial == null || currentMaterial == null) {
+            // Both empty is a match; one empty and one occupied is a real change.
+            return storedMaterial == currentMaterial;
+        }
+        return storedMaterial == currentMaterial && storedAmount == currentAmount && similar;
     }
 
     /**

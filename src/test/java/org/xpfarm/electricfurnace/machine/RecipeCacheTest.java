@@ -9,6 +9,7 @@
  */
 package org.xpfarm.electricfurnace.machine;
 
+import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 import org.junit.jupiter.api.Test;
 
@@ -83,5 +84,82 @@ class RecipeCacheTest {
         cache.store(emptyInputs(), recycling, alloys, false, null);
 
         assertTrue(cache.isValidFor(emptyInputs(), recycling, alloys));
+    }
+
+    // ---- slotMatches: the per-slot decision, truth-tabled ---------------------------
+    //
+    // Every test above passes all-null inputs, so isValidFor's loop could only ever reach
+    // its "both sides empty" branch. Deleting the material/amount comparison AND the
+    // isSimilar comparison left all of them green -- which means the comparisons that
+    // actually invalidate the cache on an input change had no coverage at all. That is a
+    // correctness hole, not a performance one: a fingerprint that never notices an input
+    // change keeps a machine smelting a recipe its inputs no longer contain.
+    //
+    // slotMatches is stated over Material (an enum), int and boolean precisely so it can
+    // be exercised headlessly -- the same reason MetalClassifier is split that way. See
+    // that class's test for the constraint: a real ItemStack cannot be constructed
+    // without a running server.
+
+    @Test
+    void slotMatches_bothSlotsEmpty_matches() {
+        assertTrue(RecipeCache.slotMatches(null, 0, null, 0, false));
+    }
+
+    @Test
+    void slotMatches_storedEmptyAndCurrentOccupied_doesNotMatch() {
+        // A player put something into a slot that was empty when the recipe resolved.
+        assertFalse(RecipeCache.slotMatches(null, 0, Material.IRON_SWORD, 1, true));
+    }
+
+    @Test
+    void slotMatches_storedOccupiedAndCurrentEmpty_doesNotMatch() {
+        // A player took the last item out -- or the ticker consumed it on completion.
+        assertFalse(RecipeCache.slotMatches(Material.IRON_SWORD, 1, null, 0, true));
+    }
+
+    @Test
+    void slotMatches_sameMaterialAndAmountAndSimilar_matches() {
+        assertTrue(RecipeCache.slotMatches(Material.IRON_SWORD, 3, Material.IRON_SWORD, 3, true));
+    }
+
+    @Test
+    void slotMatches_sameMaterialDifferentAmount_doesNotMatch() {
+        // The overwhelmingly common real change: a player added or removed items, or the
+        // completion step consumed one. The amount is part of the resolution -- it decides
+        // how many ingots come out -- so a cache that ignored it would deposit the wrong
+        // quantity. `similar` is true here so only the amount comparison can reject it.
+        assertFalse(RecipeCache.slotMatches(Material.IRON_SWORD, 3, Material.IRON_SWORD, 2, true));
+        assertFalse(RecipeCache.slotMatches(Material.IRON_SWORD, 2, Material.IRON_SWORD, 3, true));
+    }
+
+    @Test
+    void slotMatches_differentMaterial_doesNotMatch() {
+        // similar is true so that only the material comparison can reject this: a cache
+        // that dropped it would resolve gold gear as if it were still iron.
+        assertFalse(RecipeCache.slotMatches(Material.IRON_SWORD, 1, Material.GOLDEN_SWORD, 1, true));
+    }
+
+    @Test
+    void slotMatches_sameMaterialAndAmountButNotSimilar_doesNotMatch() {
+        // The case the cheap tests cannot see: two stacks differing only in ItemMeta,
+        // damage, or PDC -- a plain iron sword versus one another plugin has tagged.
+        // MetalClassifier discriminates on exactly that, so reusing the resolution here
+        // would smelt the wrong metal.
+        assertFalse(RecipeCache.slotMatches(Material.IRON_SWORD, 1, Material.IRON_SWORD, 1, false));
+    }
+
+    @Test
+    void slotMatches_similarIsIgnoredWhenEitherSlotIsEmpty() {
+        // isValidFor never evaluates isSimilar for an empty slot, so it passes false
+        // there; the empty/empty case must not be rejected because of it.
+        assertTrue(RecipeCache.slotMatches(null, 0, null, 0, false));
+        assertFalse(RecipeCache.slotMatches(null, 0, Material.IRON_SWORD, 1, false));
+    }
+
+    @Test
+    void slotMatches_amountIsComparedEvenWhenBothAreZero() {
+        // Guards the degenerate encoding: an occupied slot never has amount 0, but the
+        // rule must not depend on that to reach a decision.
+        assertTrue(RecipeCache.slotMatches(Material.IRON_SWORD, 0, Material.IRON_SWORD, 0, true));
     }
 }
