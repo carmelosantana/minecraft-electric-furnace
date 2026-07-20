@@ -67,8 +67,11 @@ import java.util.function.Supplier;
  *       unmodifiable <em>view</em>, not a copy, so a concurrent structural change to
  *       the backing map would throw {@code ConcurrentModificationException} from
  *       outside every per-machine guard.</li>
- *   <li><b>A machine mid-deferred-sync is skipped entirely, not merely
- *       under-refreshed.</b> See {@link #shouldSkipMachine}.</li>
+ *   <li><b>Slots are read and written, never aliased.</b> A machine's items live in a
+ *       Bukkit {@code Inventory} now, and {@code Inventory#getItem} is treated as
+ *       returning a snapshot: every consumption and deposit below is
+ *       read-modify-write-back. See {@link MachineState}'s note on why mutating what
+ *       {@code getItem} returned is correct only by implementation accident.</li>
  * </ul>
  */
 public final class MachineTicker {
@@ -173,26 +176,6 @@ public final class MachineTicker {
         return new Step(Outcome.ADVANCED, progress, burn, consumeOneFuel);
     }
 
-    /**
-     * Whether a machine must be skipped <b>entirely</b> for this tick -- not merely
-     * have its GUI refresh skipped -- because a {@code MachineGuiListener#scheduleSync}
-     * deferred callback for it has not run yet.
-     *
-     * <p><b>Skipping the repaint is not enough; the state must not be touched either.</b>
-     * If this ticker consumed fuel or inputs during that window, the deferred sync would
-     * one tick later fold the stale, pre-tick inventory back over {@link MachineState},
-     * restoring what the tick just spent while {@code progressTicks} stayed advanced --
-     * duplicated fuel. A one-tick pause per player click is harmless; un-consuming
-     * already-spent fuel is not.
-     *
-     * <p>Pure over the same {@code pendingSyncCount} primitive that
-     * {@code FurnaceGui#shouldSkipRefresh} guards, with the same polarity, so both sides
-     * of the collision close on the same fact.
-     */
-    public static boolean shouldSkipMachine(int pendingSyncCount) {
-        return pendingSyncCount > 0;
-    }
-
     // =================================================================================
     // Lifecycle
     // =================================================================================
@@ -280,10 +263,6 @@ public final class MachineTicker {
             // identical discipline. It is ticked again once its chunk is loaded.
             return;
         }
-        if (shouldSkipMachine(FurnaceGui.pendingSyncCount(openGui))) {
-            return;
-        }
-
         boolean powered = block.getBlockPower() > 0;
         boolean requireSignal = config.machine().requireRedstoneSignal();
 
@@ -321,10 +300,13 @@ public final class MachineTicker {
             }
         }
 
-        // Keep any open viewer's GUI in sync with the state this tick just changed.
+        // The items a viewer sees are the items this tick just changed -- one inventory,
+        // no copy to push. Only the status indicator is this plugin's own drawing, so
+        // only the status indicator needs repainting, and only when somebody is looking.
         // Null when nobody has this block's GUI open, which is the common case.
         if (openGui != null) {
-            FurnaceGui.refreshFromState(openGui, state, config, powered);
+            FurnaceGui.refreshIndicator(openGui, config, powered, !state.isIdle(),
+                    state.progressTicks(), config.machine().smeltTicks());
         }
     }
 
@@ -340,11 +322,15 @@ public final class MachineTicker {
      */
     private void resolveIfStale(MachineState state, EfConfig config, AlloyRegistry alloys, Block block) {
         RecipeCache cache = state.recipeCache();
-        if (cache.isValidFor(state.inputs(), config.recycling(), alloys)) {
+        // Read the slots once: state.inputs() now snapshots a live inventory, so calling
+        // it three times would be three reads of something that must not change between
+        // the validity check, the resolution, and the fingerprint stored for next tick.
+        ItemStack[] slots = state.inputs();
+        if (cache.isValidFor(slots, config.recycling(), alloys)) {
             return;
         }
 
-        List<RecycleInput> inputs = collectInputs(state.inputs(), config);
+        List<RecycleInput> inputs = collectInputs(slots, config);
         RecycleResult result = RecycleResolver.resolve(inputs, config.recycling(), alloys);
 
         ItemStack candidate = result.kind() == RecycleResult.Kind.REJECTED
@@ -353,7 +339,7 @@ public final class MachineTicker {
         // A null candidate past a non-rejected result means an unknown alloy id (already
         // logged by candidateItemFor) -- degrade exactly like a rejected recipe: nothing
         // consumed, nothing produced.
-        cache.store(state.inputs(), config.recycling(), alloys, candidate != null, candidate);
+        cache.store(slots, config.recycling(), alloys, candidate != null, candidate);
     }
 
     private static boolean isChunkLoaded(Block block) {
@@ -443,6 +429,7 @@ public final class MachineTicker {
             state.setOutput(candidateOutput.clone());
         } else {
             current.setAmount(current.getAmount() + candidateOutput.getAmount());
+            state.setOutput(current);
         }
     }
 
@@ -460,9 +447,10 @@ public final class MachineTicker {
             }
             int remaining = item.getAmount() - 1;
             if (remaining <= 0) {
-                inputs[i] = null;
+                state.setInput(i, null);
             } else {
                 item.setAmount(remaining);
+                state.setInput(i, item);
             }
         }
     }
@@ -480,6 +468,7 @@ public final class MachineTicker {
             state.setFuel(null);
         } else {
             fuel.setAmount(remaining);
+            state.setFuel(fuel);
         }
     }
 

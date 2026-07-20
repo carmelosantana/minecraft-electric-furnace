@@ -133,7 +133,7 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(
                     new MachineBlockListener(machines, store, this::config), this);
             getServer().getPluginManager().registerEvents(
-                    new MachineGuiListener(this, store, machines, this::config), this);
+                    new MachineGuiListener(this::config), this);
             getServer().getPluginManager().registerEvents(
                     new RedstoneListener(machines, store, this::config), this);
         });

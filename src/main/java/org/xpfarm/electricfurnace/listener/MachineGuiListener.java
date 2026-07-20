@@ -9,7 +9,6 @@
  */
 package org.xpfarm.electricfurnace.listener;
 
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
@@ -17,19 +16,15 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
-import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.plugin.Plugin;
 import org.xpfarm.electricfurnace.config.EfConfig;
 import org.xpfarm.electricfurnace.gui.FurnaceGui;
 import org.xpfarm.electricfurnace.gui.GuiLayout;
 import org.xpfarm.electricfurnace.gui.SlotLock;
 import org.xpfarm.electricfurnace.item.MetalClassifier;
-import org.xpfarm.electricfurnace.machine.MachineRegistry;
 import org.xpfarm.electricfurnace.machine.MachineState;
-import org.xpfarm.electricfurnace.machine.MachineStore;
 
 import java.util.HashSet;
 import java.util.Objects;
@@ -69,41 +64,28 @@ import java.util.function.Supplier;
  * guarded ones, in a single event -- {@link #shouldCancelDrag} cancels the whole drag
  * if any touched top slot is FILLER, INDICATOR, or OUTPUT.
  *
- * <p><b>Never destroy items.</b> A click or drag that is allowed to proceed schedules
- * {@link #scheduleSync} for the next server tick, which folds the inventory's
- * resulting contents into the machine's {@link MachineState} via
- * {@link FurnaceGui#syncToState} and redraws the status indicator -- deferred one tick
- * because Bukkit applies a click's own item movement only after this event handler
- * returns, so reading slot contents synchronously here would still see the pre-click
- * state. {@link InventoryCloseEvent} -- for any reason, including disconnect -- also
- * syncs immediately: the items belong to the machine now, not to the closing player,
- * so nothing is returned here (see {@link FurnaceGui#returnAllItems}'s narrower
- * remaining callers).
+ * <p><b>Never destroy items.</b> A click or drag this class allows to proceed needs no
+ * follow-up at all. The GUI inventory <em>is</em> the machine's storage (see
+ * {@link MachineState}), so the item the player just moved is already exactly where the
+ * ticker and {@code MachineStateCodec} will look for it. Bukkit still finishes applying
+ * the move only after this handler returns -- but with one storage location that no
+ * longer matters, because there is no second copy waiting to be reconciled with it. The
+ * one-tick deferred sync this class used to schedule, and the pending-sync counter that
+ * existed to stop the ticker colliding with that deferral, are both gone with it.
+ *
+ * <p>A close likewise does nothing to the items: they belong to the
+ * machine and they stay in the machine (see {@link FurnaceGui#returnAllItems}'s narrower
+ * remaining callers). No close handler is needed, so there is none.
  */
 public final class MachineGuiListener implements Listener {
 
-    private final Plugin plugin;
-    private final MachineStore store;
-    private final MachineRegistry machines;
     private final Supplier<EfConfig> configSupplier;
 
     /**
-     * @param plugin         owning plugin instance, used only to schedule the
-     *                       post-click state sync on the next server tick
-     * @param store          the block-PDC-backed machine state store; every click/drag
-     *                       is folded back into the block's live {@link MachineState}
-     *                       here, and the run lock reads {@link MachineState#isIdle()}
-     *                       from it
-     * @param machines       the machine location registry, consulted before a deferred
-     *                       sync runs so a block broken between the click and the next
-     *                       tick is never written back into
-     * @param configSupplier supplies the live, possibly-reloaded configuration
+     * @param configSupplier supplies the live, possibly-reloaded configuration, for the
+     *                       shift-click routing decision
      */
-    public MachineGuiListener(Plugin plugin, MachineStore store, MachineRegistry machines,
-            Supplier<EfConfig> configSupplier) {
-        this.plugin = Objects.requireNonNull(plugin, "plugin");
-        this.store = Objects.requireNonNull(store, "store");
-        this.machines = Objects.requireNonNull(machines, "machines");
+    public MachineGuiListener(Supplier<EfConfig> configSupplier) {
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
     }
 
@@ -149,11 +131,6 @@ public final class MachineGuiListener implements Listener {
         boolean running = isRunning(top);
         if (shouldCancelForLock(role, effect, running)) {
             event.setCancelled(true);
-            return;
-        }
-
-        if (event.getWhoClicked() instanceof Player player) {
-            scheduleSync(player, top);
         }
     }
 
@@ -201,10 +178,6 @@ public final class MachineGuiListener implements Listener {
         }
 
         event.setCurrentItem(moving.getAmount() <= 0 ? null : moving);
-
-        if (event.getWhoClicked() instanceof Player player) {
-            scheduleSync(player, top);
-        }
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -228,74 +201,19 @@ public final class MachineGuiListener implements Listener {
 
         if (shouldCancelDragForLock(touchedTopRoles, isRunning(top))) {
             event.setCancelled(true);
-            return;
         }
-
-        if (event.getWhoClicked() instanceof Player player) {
-            scheduleSync(player, top);
-        }
-    }
-
-    // No ignoreCancelled: InventoryCloseEvent is not Cancellable, so the flag would be
-    // meaningless here.
-    @EventHandler
-    public void onClose(InventoryCloseEvent event) {
-        Inventory top = event.getView().getTopInventory();
-        if (!FurnaceGui.isFurnaceGui(top)) {
-            return;
-        }
-        // The items belong to the machine now, not the closing player -- fold whatever
-        // is currently in the inventory into its MachineState. Done synchronously
-        // (not deferred a tick, unlike scheduleSync) because a close is not a click:
-        // there is no pending Bukkit-internal item movement still to apply, so the
-        // inventory's contents are already final.
-        FurnaceGui.blockOf(top).ifPresent(block -> FurnaceGui.syncToState(top, store.get(block)));
-    }
-
-    /** Whether the machine backing {@code top} currently has a run in progress. */
-    private boolean isRunning(Inventory top) {
-        return FurnaceGui.blockOf(top).map(store::get).map(state -> !state.isIdle()).orElse(false);
     }
 
     /**
-     * Schedules a state sync and indicator refresh for the next server tick -- a
-     * click's item movement is applied by the server only after this event handler
-     * returns, so reading slot contents synchronously here would see the pre-click
-     * state.
+     * Whether the machine backing {@code top} currently has a run in progress.
      *
-     * <p>Marks {@code top}'s pending-sync counter synchronously, before the deferral,
-     * and clears it from inside the deferred callback (in a {@code finally}, so every
-     * exit path -- including the early return below -- clears it). This is the other
-     * half of {@link FurnaceGui#refreshFromState}'s guard: it lets that method (called
-     * by the future {@code MachineTicker}) tell whether this exact sync is still in
-     * flight and skip a call that would otherwise collide with it. See
-     * {@link FurnaceGui#markPendingSync} for why marking must happen here, synchronously,
-     * rather than inside the deferred lambda.
+     * <p>Read straight off the inventory's holder. {@code top} is the machine's own
+     * storage, so its {@link MachineState} is reachable without a {@link MachineStore}
+     * lookup -- and, more to the point, without any risk of consulting a <em>different</em>
+     * state object than the one whose slots this click is about to change.
      */
-    private void scheduleSync(Player player, Inventory top) {
-        FurnaceGui.blockOf(top).ifPresent(block -> {
-            FurnaceGui.markPendingSync(top);
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                try {
-                    if (!machines.isMachine(block)) {
-                        // The block stopped being a machine between the click and this
-                        // tick (e.g. broken by another player). Its store entry, if
-                        // any, has already been handled by that path -- writing into it
-                        // now would resurrect stale contents under whatever is now at
-                        // this location.
-                        return;
-                    }
-                    MachineState state = store.get(block);
-                    FurnaceGui.syncToState(top, state);
-                    boolean powered = block.getBlockPower() > 0;
-                    EfConfig config = configSupplier.get();
-                    FurnaceGui.refreshIndicator(top, config, powered, !state.isIdle(),
-                            state.progressTicks(), config.machine().smeltTicks());
-                } finally {
-                    FurnaceGui.clearPendingSync(top);
-                }
-            });
-        });
+    private boolean isRunning(Inventory top) {
+        return FurnaceGui.stateOf(top).map(state -> !state.isIdle()).orElse(false);
     }
 
     // =================================================================================
