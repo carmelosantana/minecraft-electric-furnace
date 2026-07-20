@@ -40,17 +40,14 @@ import java.util.logging.Logger;
  * them.
  *
  * <p><b>The GUI is a shared view onto persistent machine state, not its owner.</b>
- * {@link #open} no longer creates a fresh, empty inventory: it binds a single
- * {@code Inventory} per machine block, populated once from that block's
- * {@link MachineState} (held by {@link MachineStore}) and reused for every later
- * viewer, so two players watching the same machine see identical contents update
- * live. Closing the GUI ({@code InventoryCloseEvent}) no longer drains it back to the
- * player -- the items belong to the machine now, and {@link #syncToState} folds
- * whatever is currently in the inventory back into that machine's persisted state.
- * {@link #returnAllItems} still exists, but its callers narrow to the two cases where
- * there genuinely is no machine left to hold the items: {@link #closeForBlock}
- * (the block is about to be broken) and {@link #closeAll} (shutdown, and only for a
- * machine whose state could not be persisted).
+ * {@link #open} binds a single {@code Inventory} per machine block, populated from that
+ * block's {@link MachineState} (held by {@link MachineStore}) and reused for every later
+ * viewer, so two players watching the same machine see identical contents update live.
+ * The items belong to the machine, so a normal close does not drain them back to the
+ * player: {@link #syncToState} folds the inventory into the machine's persisted state
+ * instead. {@link #returnAllItems} is reserved for the two cases where there is no
+ * machine left to hold them -- {@link #closeForBlock} (the block is about to be broken)
+ * and {@link #closeAll} (shutdown, and only when the state could not be persisted).
  *
  * <p>The status-indicator decision ({@link #indicatorStateOf}) is a pure function over
  * primitives -- no {@code org.bukkit} type -- so {@code FurnaceGuiTest} exercises every
@@ -356,31 +353,18 @@ public final class FurnaceGui {
      * indicator -- unless a deferred GUI-&gt;state sync is still in flight for this
      * machine, in which case this call is skipped entirely.
      *
-     * <p>{@link #buildInventory} already does the input/fuel/output half of this once,
-     * via {@link #populateFromState}, when a fresh inventory is first built. This
-     * public entry point exists for a different caller: a driver (the future
-     * {@code MachineTicker}) that mutates a machine's {@link MachineState} -- consuming
-     * inputs, producing output -- <em>while</em> a viewer already has that block's GUI
-     * open. Without pushing the change back into the shared {@code Inventory}, the
-     * open GUI would keep showing stale, pre-tick contents.
+     * <p>Called by {@code MachineTicker} when it mutates a machine's
+     * {@link MachineState} -- consuming inputs, producing output -- while a viewer has
+     * that block's GUI open, so the open GUI does not keep showing pre-tick contents.
      *
-     * <p><b>The collision this guards against.</b>
-     * {@code MachineGuiListener#scheduleSync} defers folding a click's item movement
-     * into {@code state} by one tick, because Bukkit only finishes applying the move
-     * after its own event handler returns. A driver calling this method in that same
-     * window -- and it would run first, per {@link #markPendingSync}'s javadoc -- would
-     * collide with it in both directions: repopulating from state before the deferred
-     * sync runs would overwrite an item a player just placed (already gone from their
-     * inventory, not yet folded into {@code state}) with state's stale, item-less
-     * arrays, and the deferred sync would then copy that clobbered inventory back over
-     * state, so the item ends up nowhere; taking from the output slot (always
-     * permitted) would similarly get repopulated from stale state before the deferred
-     * sync overwrites state with the already-empty inventory, so the item ends up both
-     * on the player's cursor and, briefly, back in the GUI and state. Guarding on
-     * {@link #shouldSkipRefresh} closes both directions: this call is skipped entirely
-     * while any deferred sync for this machine is outstanding, and resumes on the
-     * following call once {@link #clearPendingSync} has run -- which, for a driver that
-     * ticks every server tick, means "the very next tick," not an indefinite stall.
+     * <p><b>Why the guard.</b> {@code MachineGuiListener#scheduleSync} defers folding a
+     * click's item movement into {@code state} by one tick, because Bukkit only finishes
+     * applying the move after its own event handler returns. Repainting inside that
+     * window would overwrite an item the player just placed -- already gone from their
+     * inventory, not yet folded into {@code state} -- with state's stale arrays, and the
+     * deferred sync would then copy that clobbered inventory back over state, leaving
+     * the item nowhere. Skipping resumes on the next tick, once
+     * {@link #clearPendingSync} has run.
      */
     public static void refreshFromState(Inventory inventory, MachineState state, EfConfig config, boolean powered) {
         Objects.requireNonNull(inventory, "inventory");
@@ -526,14 +510,11 @@ public final class FurnaceGui {
      * (shutdown, only when persisting failed). A normal close does not call this --
      * see {@link #syncToState}.
      *
-     * <p><b>Gives before clearing, per slot.</b> Each slot is handed to the player (or
-     * dropped) <em>before</em> its slot is cleared. If {@link #giveOrDrop} -&gt;
-     * {@code dropItemNaturally} throws -- exactly the world-teardown scenario
-     * {@link #closeAll}'s per-viewer {@code try}/{@code catch} exists for -- the item
-     * is still sitting in that slot when the exception propagates, not already cleared
-     * and gone nowhere. Clearing first (the previous order) meant a mid-loop throw left
-     * that one slot's item existing in zero places: not on the player, not dropped, and
-     * no longer in the inventory either.
+     * <p><b>Gives before clearing, per slot -- do not reorder.</b> If {@link #giveOrDrop}
+     * -&gt; {@code dropItemNaturally} throws, which it can during world teardown, the
+     * item is still sitting in its slot when the exception propagates. Clearing first
+     * would leave that item existing in zero places: not on the player, not dropped, and
+     * no longer in the inventory.
      */
     public static void returnAllItems(Inventory inventory, Player player) {
         Objects.requireNonNull(inventory, "inventory");
@@ -572,16 +553,12 @@ public final class FurnaceGui {
      *
      * <p><b>Does not depend on {@code InventoryCloseEvent}.</b> If any viewer's items
      * were returned, {@code block}'s state in {@code store} is cleared directly (via
-     * {@link MachineStore#forget}) before this method returns. Earlier, this method's
-     * correctness against {@code MachineBlockListener}'s {@code dropStoreContents}
-     * relied on {@code player.closeInventory()} firing {@code InventoryCloseEvent},
-     * which {@code MachineGuiListener#onClose} used to sync the now-emptied inventory
-     * into {@code MachineState} -- a dependency that was silently false whenever that
-     * event did not reach {@code onClose}: {@code MachineState} would still hold the
-     * items just handed to the viewer, and {@code dropStoreContents} would then drop
-     * those same items on the ground too, duplicating them. Calling
-     * {@link MachineStore#forget} here removes that dependency: {@code store} always
-     * knows this block's state is now empty, event or no event.
+     * {@link MachineStore#forget}) before this method returns, rather than trusting
+     * {@code player.closeInventory()} to fire an event that reaches
+     * {@code MachineGuiListener#onClose}. If that event were ever missed,
+     * {@code MachineState} would still hold the items just handed to the viewer and
+     * {@code MachineBlockListener}'s {@code dropStoreContents} would drop the same items
+     * on the ground -- duplicating them.
      *
      * @param store the machine state store, or {@code null} if it failed to wire up.
      *              Items are still returned when {@code store} is {@code null}; only
@@ -633,10 +610,7 @@ public final class FurnaceGui {
      * {@link CloseAllStep#RETURN}) always comes before {@link CloseAllStep#CLOSE}.
      * Reordering it after {@code CLOSE} would put us back to relying on an
      * {@code InventoryCloseEvent} that never fires during {@code onDisable} -- see
-     * {@link #closeAll}'s note on why that dependency is unsafe here. This restores,
-     * for both branches {@code closeAll} now has, the same guarantee the original
-     * (pre-persistence) {@code ShutdownStep}/{@code shutdownSteps()} pinned for its one
-     * unconditional branch.
+     * {@link #closeAll}'s note on why that dependency is unsafe here.
      */
     public static List<CloseAllStep> closeAllSteps(boolean persistSucceeded) {
         return persistSucceeded

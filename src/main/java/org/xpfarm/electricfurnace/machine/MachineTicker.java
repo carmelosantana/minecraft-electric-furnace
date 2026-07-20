@@ -38,68 +38,37 @@ import java.util.function.Supplier;
  * Advances every machine in a loaded chunk, one tick at a time.
  *
  * <p>{@link #step} is the entire decision, expressed as a pure transition over
- * primitives -- no {@code org.bukkit} type -- so every stall, resume, and completion path
- * is table-tested with no running server, following the same pattern as
- * {@code FurnaceGui.indicatorStateOf}. Nothing about {@link #step}'s logic changed to add the
- * runner below; it is still the sole authority for what one tick does to one machine.
+ * primitives -- no {@code org.bukkit} type -- so every stall, resume, and completion
+ * path is table-tested with no running server. It is the sole authority for what one
+ * tick does to one machine; the runner below only gathers facts for it and applies its
+ * answer.
  *
  * <h2>The Bukkit-facing runner</h2>
  *
- * <p>An instance of this class owns exactly one {@link BukkitTask}, started by
- * {@link #start()} and running every single tick ({@code runTaskTimer(plugin, 1L,
- * 1L)}) -- the same one-task-for-the-whole-server discipline {@code MachineEffects}
- * uses, just at a much higher frequency, since progress and burn time are ticked here,
- * not merely displayed. Each pass iterates {@link MachineStore#liveStates()} --
- * deliberately never {@code MachineRegistry.machinesIn}, which would mean a chunk-PDC
- * read every single tick for every loaded chunk.
- *
- * <p><b>This is safe only because {@code MachineStore} keeps {@code liveStates()}
- * populated for every machine in a loaded chunk, not merely ones a player has
- * touched.</b> An earlier version of this note claimed the opposite: that a machine
- * absent from the live map "has never been touched" and is therefore "provably at
- * rest" ({@link MachineState#empty()}), so skipping it changes nothing. That was
- * already false the moment machine state started persisting to the block's own PDC --
- * an untouched-this-session machine can have a half-finished run and a full fuel slot
- * sitting on disk, and silently skipping it would mean exactly the "load it, walk
- * away, come back to nothing having happened" failure this plugin exists to prevent.
- * What actually makes iterating {@code liveStates()} correct is that
- * {@code MachineStore#onChunkLoad} hydrates every registered machine in a chunk the
- * moment it loads, and {@code MachineStore#hydrateLoadedChunks()} does the same once
- * at plugin enable for chunks already resident in memory -- so by the time this
- * ticker's task ever runs, "in a loaded chunk" and "in {@code liveStates()}" are the
- * same set, modulo the one-tick window described in {@link #shouldSkipMachine}. See
- * {@code MachineStore}'s class-level "Every path a machine can (re-)enter memory"
- * note.
+ * <p>An instance owns exactly one {@link BukkitTask}, started by {@link #start()} and
+ * running every tick. Each pass iterates {@link MachineStore#liveStates()}, never
+ * {@code MachineRegistry.machinesIn}, which would mean a chunk-PDC read every tick for
+ * every loaded chunk. That is correct because {@code MachineStore} hydrates every
+ * registered machine in a chunk as the chunk loads (and every already-resident chunk at
+ * plugin enable), so "in a loaded chunk" and "in {@code liveStates()}" are the same
+ * set. A machine missing from the live map would silently not advance -- exactly the
+ * "load it, walk away, come back to nothing having happened" failure this plugin exists
+ * to prevent -- so that hydration is load-bearing, not an optimization.
  *
  * <h2>Never destroy an item, never duplicate one</h2>
  *
- * <p>Two disciplines make that true here:
- *
  * <ul>
  *   <li><b>One bad machine cannot cost every other machine.</b> {@link #run()} wraps
- *       each machine's pass in its own {@code try}/{@code catch}, exactly like
- *       {@code MachineStore#flushAll} and {@code MachineEffects} already do for their
- *       own per-machine loops -- an exception inside a scheduled task is otherwise
- *       swallowed by the scheduler, aborting the pass partway through, which is exactly
- *       how items get destroyed. {@link #run()} also snapshots
+ *       each machine's pass in its own {@code try}/{@code catch}: an exception inside a
+ *       scheduled task is otherwise swallowed by the scheduler, aborting the pass
+ *       partway through, which is how items get destroyed. It also snapshots
  *       {@link MachineStore#liveStates()}'s entries into a plain list before iterating,
- *       and wraps the snapshot-and-iterate step in its own outer {@code try}/{@code
- *       catch} as a backstop -- {@code liveStates()} returns an unmodifiable *view*
- *       over {@code MachineStore}'s live map, not a copy, so a concurrent structural
- *       change to that map would otherwise throw {@code ConcurrentModificationException}
- *       from outside every per-machine guard. See {@code MachineStore#live}'s javadoc
- *       for why that map is a {@code ConcurrentHashMap} rather than a plain one --
- *       the two mitigations close this from both ends.</li>
- *   <li><b>A machine mid-deferred-sync is skipped entirely, not merely under-refreshed.</b>
- *       {@code MachineGuiListener#scheduleSync} defers folding a click's item movement
- *       into {@link MachineState} by one tick. {@code FurnaceGui#shouldSkipRefresh}
- *       alone (Task 6) only stopped this ticker from repainting a stale GUI during that
- *       window -- it did not stop this ticker from mutating {@code MachineState}
- *       itself. Mutating state during that window and then having the deferred sync
- *       overwrite it with the stale, pre-tick inventory contents restores whatever fuel
- *       and inputs this tick just consumed, while leaving {@code progressTicks}
- *       advanced: duplicated fuel. {@link #shouldSkipMachine} is the pure guard that
- *       closes this -- see its own javadoc.</li>
+ *       under an outer {@code try}/{@code catch}. {@code liveStates()} is an
+ *       unmodifiable <em>view</em>, not a copy, so a concurrent structural change to
+ *       the backing map would throw {@code ConcurrentModificationException} from
+ *       outside every per-machine guard.</li>
+ *   <li><b>A machine mid-deferred-sync is skipped entirely, not merely
+ *       under-refreshed.</b> See {@link #shouldSkipMachine}.</li>
  * </ul>
  */
 public final class MachineTicker {
@@ -209,24 +178,16 @@ public final class MachineTicker {
      * have its GUI refresh skipped -- because a {@code MachineGuiListener#scheduleSync}
      * deferred callback for it has not run yet.
      *
-     * <p>Carried forward from Task 6's review. {@code FurnaceGui#shouldSkipRefresh}
-     * closes the collision from the GUI-repaint side only: it stops this ticker from
-     * overwriting an open inventory with stale state mid-window, but says nothing about
-     * this ticker mutating {@link MachineState} itself during that same window. If it
-     * did, the sequence is: this tick consumes fuel and/or inputs from {@code state}
-     * (the refresh is skipped, so the open inventory still shows the pre-tick
-     * contents); one tick later, the deferred sync folds that same stale, still-pre-
-     * tick inventory back over {@code state} -- restoring the fuel and inputs this tick
-     * just consumed, while {@code progressTicks} stays wherever this tick left it. That
-     * is duplicated fuel (and duplicated inputs): consumed once by the tick, then
-     * un-consumed by the stale sync.
+     * <p><b>Skipping the repaint is not enough; the state must not be touched either.</b>
+     * If this ticker consumed fuel or inputs during that window, the deferred sync would
+     * one tick later fold the stale, pre-tick inventory back over {@link MachineState},
+     * restoring what the tick just spent while {@code progressTicks} stayed advanced --
+     * duplicated fuel. A one-tick pause per player click is harmless; un-consuming
+     * already-spent fuel is not.
      *
-     * <p>The fix is for this ticker to never touch such a machine's state at all while
-     * a sync is in flight -- skip it outright, and pick it up again on the very next
-     * tick once {@code FurnaceGui#clearPendingSync} has run. A one-tick pause per player
-     * click is harmless; un-consuming already-spent fuel is not. Pure over the same
-     * {@code pendingSyncCount} primitive {@code FurnaceGui#shouldSkipRefresh} guards,
-     * with the same polarity, so both sides of the collision close on the same fact.
+     * <p>Pure over the same {@code pendingSyncCount} primitive that
+     * {@code FurnaceGui#shouldSkipRefresh} guards, with the same polarity, so both sides
+     * of the collision close on the same fact.
      */
     public static boolean shouldSkipMachine(int pendingSyncCount) {
         return pendingSyncCount > 0;
@@ -281,19 +242,13 @@ public final class MachineTicker {
             // Near-always empty; a machine not in it simply has no GUI to keep in sync.
             Map<Block, Inventory> openGuis = FurnaceGui.openInventoriesByBlock();
 
-            // Snapshot the entries before iterating, rather than iterating
-            // store.liveStates() directly. liveStates() is Collections.unmodifiableMap
-            // (an unmodifiable *view*) over MachineStore's own live map, not a copy --
-            // a concurrent structural change to that backing map (e.g.
-            // MachineStore#onChunkUnload removing an entry, which MachineStore's own
-            // javadoc now documents can run off the main thread on Paper, the same as
-            // MachineEffects#byChunk) would otherwise throw
-            // ConcurrentModificationException out of entrySet().iterator() itself --
-            // outside the per-machine try/catch below -- aborting this entire pass
-            // partway through every machine after the one being modified. That is
-            // exactly how items get destroyed: some machines this tick, none the next.
-            // This snapshot and MachineStore#live being a ConcurrentHashMap are
-            // complementary, not redundant -- see that field's javadoc.
+            // Snapshot the entries before iterating. liveStates() is an unmodifiable
+            // *view* over MachineStore's live map, not a copy, so a concurrent
+            // structural change to it (onChunkUnload can run off the main thread on
+            // Paper) would throw ConcurrentModificationException out of the iterator
+            // itself -- outside the per-machine try/catch below -- aborting the pass for
+            // every machine after that point. That is how items get destroyed: some
+            // machines this tick, none the next.
             List<Map.Entry<Block, MachineState>> snapshot = new ArrayList<>(store.liveStates().entrySet());
             for (Map.Entry<Block, MachineState> entry : snapshot) {
                 Block block = entry.getKey();

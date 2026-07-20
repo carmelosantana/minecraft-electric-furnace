@@ -189,21 +189,18 @@ public final class MachineStore implements Listener {
      * <h3>Closing the deferred-sync window</h3>
      *
      * <p>{@code MachineGuiListener} folds a click's item movement into a machine's
-     * {@link MachineState} one tick <em>after</em> the click, because Bukkit only
-     * finishes applying the move once its own event handler returns. A
-     * {@link WorldSaveEvent} or {@link ChunkUnloadEvent} landing inside that one-tick
-     * window would otherwise flush state one edit behind whatever is actually sitting
-     * in the open GUI -- an item just placed into an input slot (already gone from the
-     * player's inventory) could exist nowhere; an item just taken from the output slot
-     * (an OUTPUT take is always permitted) could exist both in the player's inventory
-     * and, stale, in this flush. Before encoding, this method folds any
-     * currently-open GUI for {@code block} into {@code state} directly (see
-     * {@link FurnaceGui#findOpenInventory}/{@link FurnaceGui#syncToState}), closing
-     * that window without changing the one-tick deferral and without a polling task.
-     * That sync attempt is best-effort: a failure there is logged and does not stop
-     * the (possibly one-tick-stale, but still valid) in-memory state from reaching
-     * disk -- this method must stay fail-soft and non-throwing, since it runs on the
-     * chunk-unload path.
+     * {@link MachineState} one tick <em>after</em> the click. A {@link WorldSaveEvent} or
+     * {@link ChunkUnloadEvent} landing inside that window would flush state one edit
+     * behind the open GUI: an item just placed into an input slot (already gone from the
+     * player's inventory) could exist nowhere, and an item just taken from the output
+     * slot could exist both in the player's inventory and, stale, in this flush. So
+     * before encoding, this method folds any currently-open GUI for {@code block} into
+     * {@code state} (see {@link FurnaceGui#findOpenInventory}/
+     * {@link FurnaceGui#syncToState}).
+     *
+     * <p>That sync is best-effort: a failure is logged and does not stop the (possibly
+     * one-tick-stale, but still valid) in-memory state from reaching disk. This method
+     * runs on the chunk-unload path and must stay fail-soft and non-throwing.
      */
     public void flush(Block block) {
         Objects.requireNonNull(block, "block");
