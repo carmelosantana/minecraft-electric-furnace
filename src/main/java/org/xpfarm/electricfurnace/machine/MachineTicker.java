@@ -12,6 +12,7 @@ package org.xpfarm.electricfurnace.machine;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
@@ -276,6 +277,10 @@ public final class MachineTicker {
         AlloyRegistry alloys = alloysSupplier.get();
 
         try {
+            // One online-player scan for the whole pass, not one (or two) per machine.
+            // Near-always empty; a machine not in it simply has no GUI to keep in sync.
+            Map<Block, Inventory> openGuis = FurnaceGui.openInventoriesByBlock();
+
             // Snapshot the entries before iterating, rather than iterating
             // store.liveStates() directly. liveStates() is Collections.unmodifiableMap
             // (an unmodifiable *view*) over MachineStore's own live map, not a copy --
@@ -293,7 +298,7 @@ public final class MachineTicker {
             for (Map.Entry<Block, MachineState> entry : snapshot) {
                 Block block = entry.getKey();
                 try {
-                    tickOne(block, entry.getValue(), config, alloys);
+                    tickOne(block, entry.getValue(), config, alloys, openGuis.get(block));
                 } catch (Throwable t) {
                     // Never let one corrupt/unlucky machine abort the pass for the rest of
                     // the server's machines -- a mid-pass throw here is swallowed by the
@@ -313,36 +318,27 @@ public final class MachineTicker {
         }
     }
 
-    private void tickOne(Block block, MachineState state, EfConfig config, AlloyRegistry alloys) {
+    private void tickOne(Block block, MachineState state, EfConfig config, AlloyRegistry alloys,
+            Inventory openGui) {
         if (!isChunkLoaded(block)) {
             // Never force-load a chunk to tick a machine in it -- see MachineEffects's
             // identical discipline. It is ticked again once its chunk is loaded.
             return;
         }
-        if (shouldSkipMachine(FurnaceGui.pendingSyncCount(block))) {
+        if (shouldSkipMachine(FurnaceGui.pendingSyncCount(openGui))) {
             return;
         }
 
         boolean powered = block.getBlockPower() > 0;
         boolean requireSignal = config.machine().requireRedstoneSignal();
 
-        List<RecycleInput> inputs = collectInputs(state.inputs(), config);
-        RecycleResult result = RecycleResolver.resolve(inputs, config.recycling(), alloys);
-        boolean recipeValid = result.kind() != RecycleResult.Kind.REJECTED;
+        resolveIfStale(state, config, alloys, block);
+        boolean recipeValid = state.recipeCache().recipeValid();
+        ItemStack candidateOutput = state.recipeCache().candidate();
 
-        ItemStack candidateOutput = null;
-        boolean outputBlocked = false;
-        if (recipeValid) {
-            candidateOutput = candidateItemFor(result, alloys, block);
-            if (candidateOutput == null) {
-                // Unknown alloy id (already logged by candidateItemFor) -- degrade
-                // exactly like a rejected recipe: nothing consumed, nothing produced.
-                recipeValid = false;
-            } else {
-                outputBlocked = FurnaceGui.classifyOutputSlot(state.output(), candidateOutput)
+        boolean outputBlocked = recipeValid
+                && FurnaceGui.classifyOutputSlot(state.output(), candidateOutput)
                         == FurnaceGui.OutputSlotState.DIFFERENT_ITEM;
-            }
-        }
 
         boolean fuelAvailable = FurnaceGui.hasFuel(state.fuel());
 
@@ -371,9 +367,38 @@ public final class MachineTicker {
         }
 
         // Keep any open viewer's GUI in sync with the state this tick just changed.
-        // A no-op if nobody has this block's GUI open.
-        FurnaceGui.findOpenInventory(block)
-                .ifPresent(inventory -> FurnaceGui.refreshFromState(inventory, state, config, powered));
+        // Null when nobody has this block's GUI open, which is the common case.
+        if (openGui != null) {
+            FurnaceGui.refreshFromState(openGui, state, config, powered);
+        }
+    }
+
+    /**
+     * Ensures {@code state}'s {@link RecipeCache} describes its current inputs,
+     * re-running resolution only when it does not.
+     *
+     * <p>This is the expensive half of a tick -- classifying five slots, resolving a
+     * recipe, and building a candidate {@code ItemStack} with {@code ItemMeta} and a PDC
+     * -- and a machine's inputs change on a player's timescale, not the server's. Doing
+     * it unconditionally meant every machine paid it twenty times a second, including
+     * machines sitting stalled with no fuel for hours.
+     */
+    private void resolveIfStale(MachineState state, EfConfig config, AlloyRegistry alloys, Block block) {
+        RecipeCache cache = state.recipeCache();
+        if (cache.isValidFor(state.inputs(), config.recycling(), alloys)) {
+            return;
+        }
+
+        List<RecycleInput> inputs = collectInputs(state.inputs(), config);
+        RecycleResult result = RecycleResolver.resolve(inputs, config.recycling(), alloys);
+
+        ItemStack candidate = result.kind() == RecycleResult.Kind.REJECTED
+                ? null
+                : candidateItemFor(result, alloys, block);
+        // A null candidate past a non-rejected result means an unknown alloy id (already
+        // logged by candidateItemFor) -- degrade exactly like a rejected recipe: nothing
+        // consumed, nothing produced.
+        cache.store(state.inputs(), config.recycling(), alloys, candidate != null, candidate);
     }
 
     private static boolean isChunkLoaded(Block block) {
@@ -449,10 +474,18 @@ public final class MachineTicker {
         };
     }
 
+    /**
+     * Adds a completed run's result to the output slot.
+     *
+     * <p>{@code candidateOutput} belongs to the machine's {@link RecipeCache} and is
+     * reused across ticks, so an empty slot is filled with a <em>clone</em>. Storing the
+     * cached instance itself would alias the output slot to the cache, and the next
+     * completion's merge would then grow the cache's own stack.
+     */
     private static void depositOutput(MachineState state, ItemStack candidateOutput) {
         ItemStack current = state.output();
         if (current == null || current.getType() == Material.AIR) {
-            state.setOutput(candidateOutput);
+            state.setOutput(candidateOutput.clone());
         } else {
             current.setAmount(current.getAmount() + candidateOutput.getAmount());
         }

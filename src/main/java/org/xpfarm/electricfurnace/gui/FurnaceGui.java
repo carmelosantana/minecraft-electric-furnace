@@ -24,6 +24,7 @@ import org.xpfarm.electricfurnace.machine.MachineState;
 import org.xpfarm.electricfurnace.machine.MachineStore;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -212,6 +213,29 @@ public final class FurnaceGui {
         return Optional.empty();
     }
 
+    /**
+     * Every currently-open Electric Furnace GUI, keyed by the block it belongs to, from
+     * a single pass over the online players.
+     *
+     * <p>For callers that need to look up more than one block. {@link #findOpenInventory}
+     * costs one full online-player scan per block, so a per-tick driver asking about
+     * every live machine would pay machines &times; players every tick -- almost always
+     * to discover that no GUI is open at all. This inverts that: one scan per pass,
+     * over the near-always-tiny set of open GUIs, regardless of how many machines exist.
+     * Two viewers of the same machine share one {@code Inventory}, so the map has one
+     * entry per machine, not per viewer.
+     */
+    public static Map<Block, Inventory> openInventoriesByBlock() {
+        Map<Block, Inventory> open = new HashMap<>();
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            Inventory top = viewer.getOpenInventory().getTopInventory();
+            if (top != null && top.getHolder() instanceof Holder holder) {
+                open.putIfAbsent(holder.block(), top);
+            }
+        }
+        return open;
+    }
+
     private static Inventory buildInventory(Block block, MachineState state) {
         Holder holder = new Holder(block);
         Inventory inventory = Bukkit.createInventory(holder, GuiLayout.SIZE, Component.text(GuiLayout.TITLE_TEXT));
@@ -323,9 +347,19 @@ public final class FurnaceGui {
      */
     public static int pendingSyncCount(Block block) {
         Objects.requireNonNull(block, "block");
-        return findOpenInventory(block)
-                .map(inventory -> inventory.getHolder() instanceof Holder holder ? holder.pendingSyncCount : 0)
-                .orElse(0);
+        return findOpenInventory(block).map(FurnaceGui::pendingSyncCount).orElse(0);
+    }
+
+    /**
+     * The same count as {@link #pendingSyncCount(Block)}, for a caller that has already
+     * resolved the block's open GUI (or established that there is none, passing
+     * {@code null}) and must not pay another online-player scan to find it again.
+     */
+    public static int pendingSyncCount(Inventory inventory) {
+        if (inventory != null && inventory.getHolder() instanceof Holder holder) {
+            return holder.pendingSyncCount;
+        }
+        return 0;
     }
 
     /**

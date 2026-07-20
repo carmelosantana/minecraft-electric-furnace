@@ -30,6 +30,14 @@ public final class MachineState {
     private int progressTicks;
     private int burnTicksRemaining;
 
+    /**
+     * This machine's memo of what {@link #inputs} currently resolve to. Kept here, not
+     * in {@link MachineTicker}, because it is per-machine and must outlive a single
+     * tick; it decides its own validity by re-reading {@link #inputs}, so nothing that
+     * writes to that array has to know it exists.
+     */
+    private final RecipeCache recipeCache = new RecipeCache();
+
     private MachineState() {
     }
 
@@ -73,6 +81,11 @@ public final class MachineState {
 
     public void setBurnTicksRemaining(int burnTicksRemaining) {
         this.burnTicksRemaining = Math.max(0, burnTicksRemaining);
+    }
+
+    /** This machine's recipe-resolution memo. See {@link RecipeCache}. */
+    RecipeCache recipeCache() {
+        return recipeCache;
     }
 
     /** Whether no run is currently in progress. Drives the input lock. */
