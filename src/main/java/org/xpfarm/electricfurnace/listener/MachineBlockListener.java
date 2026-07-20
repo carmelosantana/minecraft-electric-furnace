@@ -42,6 +42,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
+import java.util.logging.Logger;
 
 /**
  * Registers/unregisters Electric Furnace blocks and opens the custom GUI in place of
@@ -81,6 +82,7 @@ import java.util.function.Supplier;
  */
 public final class MachineBlockListener implements Listener {
 
+    private static final Logger LOGGER = Logger.getLogger("ElectricFurnace");
     private static final String USE_PERMISSION = "electricfurnace.use";
 
     private final MachineRegistry machines;
@@ -120,19 +122,35 @@ public final class MachineBlockListener implements Listener {
             return;
         }
 
-        // Return any open viewer's items BEFORE the block (and its virtual inventory)
-        // are gone -- never destroy items by breaking the block out from under an open GUI.
-        FurnaceGui.closeForBlock(block, store);
+        // Guarded like MachineStore#flushAll and MachineTicker#run: nothing in an
+        // event handler may throw, and an unwrapped throw here is worse than usual --
+        // it can land between dropStoreContents (items on the ground) and
+        // store.forget/machines.unregister/setDropItems(false)/the machine-item drop,
+        // leaving the block break, the vanilla drop suppression, or the registry entry
+        // out of sync with what was already dropped. Logging and returning at least
+        // stops the exception from propagating into Bukkit's own break-event handling.
+        try {
+            // Return any open viewer's items BEFORE the block (and its virtual
+            // inventory) are gone -- never destroy items by breaking the block out
+            // from under an open GUI.
+            FurnaceGui.closeForBlock(block, store);
 
-        // The machine's own persisted contents -- separate from whatever a viewer's GUI
-        // held -- must hit the ground before the store forgets them and the block stops
-        // being addressable as a machine. Progress is forfeited; items never are.
-        dropStoreContents(block);
-        store.forget(block);
+            // The machine's own persisted contents -- separate from whatever a
+            // viewer's GUI held -- must hit the ground before the store forgets them
+            // and the block stops being addressable as a machine. Progress is
+            // forfeited; items never are.
+            dropStoreContents(block);
+            store.forget(block);
 
-        machines.unregister(block);
-        event.setDropItems(false);
-        block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+            machines.unregister(block);
+            event.setDropItems(false);
+            block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+        } catch (Throwable t) {
+            LOGGER.warning("ElectricFurnace: failed to fully handle machine break at " + describe(block)
+                    + " (" + t.getClass().getName() + ": " + t.getMessage() + "); the block break may have "
+                    + "left the machine registry, its dropped contents, or the vanilla drop suppression "
+                    + "partially applied.");
+        }
     }
 
     /**
@@ -177,6 +195,17 @@ public final class MachineBlockListener implements Listener {
      * then broken deliberately: viewers force-closed (returning their contents), the
      * store's own persisted contents dropped and forgotten, registration removed, and
      * the machine item dropped unconditionally.
+     *
+     * <p><b>Per-machine try/catch is not optional here.</b> {@code blockList.removeAll}
+     * below already pulls every machine in {@code machineBlocks} out of the explosion
+     * before this method's own salvage loop runs. If that loop then threw partway
+     * through and aborted, every machine after the failing one would be left in the
+     * worst possible state: not exploded by vanilla (already removed from
+     * {@code blockList}), and not salvaged by this method either (the loop never
+     * reached it) -- its items would exist in zero places. Wrapping each machine's
+     * handling in its own guard, exactly like {@code MachineStore#flushAll} and
+     * {@code MachineTicker#run} guard their own per-machine loops, is what keeps one
+     * bad block from costing every other machine caught in the same explosion.
      */
     private void salvageExploded(List<Block> blockList) {
         List<Block> machineBlocks = new ArrayList<>();
@@ -191,12 +220,19 @@ public final class MachineBlockListener implements Listener {
         blockList.removeAll(machineBlocks);
 
         for (Block block : machineBlocks) {
-            FurnaceGui.closeForBlock(block, store);
-            dropStoreContents(block);
-            store.forget(block);
-            machines.unregister(block);
-            block.setType(Material.AIR);
-            block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+            try {
+                FurnaceGui.closeForBlock(block, store);
+                dropStoreContents(block);
+                store.forget(block);
+                machines.unregister(block);
+                block.setType(Material.AIR);
+                block.getWorld().dropItemNaturally(block.getLocation(), MachineItemFactory.create());
+            } catch (Throwable t) {
+                LOGGER.warning("ElectricFurnace: failed to salvage exploded machine at " + describe(block)
+                        + " (" + t.getClass().getName() + ": " + t.getMessage() + "); it was already removed "
+                        + "from the explosion's block list and may now be left un-salvaged -- check this "
+                        + "location by hand.");
+            }
         }
     }
 
@@ -311,5 +347,9 @@ public final class MachineBlockListener implements Listener {
                 && inventory.getHolder() instanceof BlockState blockState
                 && blockState.getType() == Material.BLAST_FURNACE
                 && machines.isMachine(blockState.getBlock());
+    }
+
+    private static String describe(Block block) {
+        return block.getWorld().getName() + " " + block.getX() + "," + block.getY() + "," + block.getZ();
     }
 }
