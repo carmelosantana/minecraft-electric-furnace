@@ -40,6 +40,14 @@ public final class MachineStateCodec {
 
     private static final int FORMAT_VERSION = 1;
 
+    /**
+     * Upper bound on a single payload's declared length. A serialized {@code ItemStack} is
+     * realistically a few KB; 1 MiB is generous headroom while still bounding the damage a
+     * corrupted length header can do. Without this cap, {@code readPayload} would allocate
+     * straight from an untrusted 4-byte field -- up to ~2GB -- on every chunk load.
+     */
+    private static final int MAX_PAYLOAD_LENGTH = 1024 * 1024;
+
     private MachineStateCodec() {
     }
 
@@ -103,7 +111,11 @@ public final class MachineStateCodec {
             byte[] fuel = readPayload(in);
             byte[] output = readPayload(in);
             return new Frame(inputs, fuel, output, Math.max(0, progress), Math.max(0, burn));
-        } catch (IOException | RuntimeException e) {
+        } catch (Throwable e) {
+            // Deliberately catches Throwable, not just IOException/RuntimeException: a
+            // corrupted length header (see MAX_PAYLOAD_LENGTH) or any other malformed input
+            // can trigger an OutOfMemoryError, which is an Error and would otherwise escape
+            // straight into the chunk-load path. Nothing in this method may throw.
             LOGGER.warning("ElectricFurnace: machine state could not be decoded ("
                     + e.getClass().getSimpleName() + "); treating the machine as empty.");
             return empty;
@@ -123,6 +135,13 @@ public final class MachineStateCodec {
         int length = in.readInt();
         if (length < 0) {
             return null;
+        }
+        if (length > MAX_PAYLOAD_LENGTH) {
+            // Untrusted length header from the PDC; treat it as malformed input rather than
+            // allocating on the caller's say-so. The catch in decodeFrame turns this into an
+            // empty machine.
+            throw new IOException("payload length " + length + " exceeds cap of "
+                    + MAX_PAYLOAD_LENGTH + " bytes");
         }
         byte[] payload = new byte[length];
         in.readFully(payload);

@@ -11,6 +11,10 @@ package org.xpfarm.electricfurnace.machine;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -26,6 +30,32 @@ class MachineStateTest {
 
     private static String dec(byte[] bytes) {
         return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    /** Lets a test build a hand-crafted frame that {@code encodeFrame} would never produce. */
+    @FunctionalInterface
+    private interface FrameWriter {
+        void write(DataOutputStream out) throws IOException;
+    }
+
+    private static byte[] rawFrame(FrameWriter writer) {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(buffer)) {
+            writer.write(out);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return buffer.toByteArray();
+    }
+
+    /** Mirrors {@code MachineStateCodec}'s private payload format for hand-built frames. */
+    private static void writeTestPayload(DataOutputStream out, byte[] payload) throws IOException {
+        if (payload == null) {
+            out.writeInt(-1);
+            return;
+        }
+        out.writeInt(payload.length);
+        out.write(payload);
     }
 
     @Test
@@ -104,6 +134,58 @@ class MachineStateTest {
 
         assertEquals(0, restored.progressTicks());
         assertEquals(0, restored.burnTicksRemaining());
+    }
+
+    @Test
+    void decodeFrame_oversizedPayloadLength_yieldsEmptyRatherThanAllocating() {
+        // A hostile/corrupt length header claiming a payload far above the 1 MiB cap must not
+        // trigger a giant allocation; it should be treated like any other malformed input.
+        byte[] hostile = rawFrame(out -> {
+            out.writeInt(1); // version
+            out.writeInt(9); // progress
+            out.writeInt(9); // burn
+            out.writeInt(0); // inputCount
+            out.writeInt(Integer.MAX_VALUE); // fuel payload length header: nowhere near real
+        });
+
+        MachineStateCodec.Frame restored = MachineStateCodec.decodeFrame(hostile);
+
+        for (byte[] input : restored.inputs()) {
+            assertNull(input);
+        }
+        assertNull(restored.fuel());
+        assertNull(restored.output());
+        assertEquals(0, restored.progressTicks());
+        assertEquals(0, restored.burnTicksRemaining());
+    }
+
+    @Test
+    void decodeFrame_inputCountBeyondCapacity_discardsExtraButStaysSynced() {
+        // inputCount claims more slots than MachineState.INPUT_COUNT; the decoder must still
+        // consume every claimed payload from the stream (or fuel/output would desync), while
+        // truncating the returned array to INPUT_COUNT.
+        byte[] hostile = rawFrame(out -> {
+            out.writeInt(1); // version
+            out.writeInt(11); // progress
+            out.writeInt(22); // burn
+            out.writeInt(8); // inputCount: more than MachineState.INPUT_COUNT
+            for (int i = 0; i < 8; i++) {
+                writeTestPayload(out, enc("i" + i));
+            }
+            writeTestPayload(out, enc("fuel"));
+            writeTestPayload(out, enc("output"));
+        });
+
+        MachineStateCodec.Frame restored = MachineStateCodec.decodeFrame(hostile);
+
+        assertEquals(MachineState.INPUT_COUNT, restored.inputs().length);
+        for (int i = 0; i < MachineState.INPUT_COUNT; i++) {
+            assertEquals("i" + i, dec(restored.inputs()[i]));
+        }
+        assertEquals("fuel", dec(restored.fuel()));
+        assertEquals("output", dec(restored.output()));
+        assertEquals(11, restored.progressTicks());
+        assertEquals(22, restored.burnTicksRemaining());
     }
 
     @Test
