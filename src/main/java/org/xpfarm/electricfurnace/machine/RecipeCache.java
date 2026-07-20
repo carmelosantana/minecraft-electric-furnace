@@ -19,16 +19,31 @@ import org.bukkit.inventory.ItemStack;
  * changed.
  *
  * <p><b>Validity is decided by re-reading the inputs, not by call sites remembering to
- * invalidate.</b> {@link MachineState#inputs()} hands out the live array, and several
- * unrelated paths write to it: the GUI folding a player's click back into state, the
- * ticker consuming one item per slot on completion, hydration from the block's PDC. A
- * cache that depended on each of those calling an {@code invalidate()} would be one
- * forgotten call away from a machine smelting an item its inputs no longer contain.
- * {@link #isValidFor} instead compares a cheap fingerprint of the slots -- stack
- * identity, {@link Material}, and amount -- so a path that mutates inputs without
- * telling anyone still gets a fresh resolution. The one mutation this cannot see is an
- * {@code ItemMeta} edited in place on a retained stack whose type and amount are
- * unchanged; nothing in this plugin does that.
+ * invalidate.</b> Several unrelated paths change a machine's input slots: a player's
+ * click landing directly in the shared inventory, the ticker consuming one item per slot
+ * on completion, hydration from the block's PDC. A cache that depended on each of those
+ * calling an {@code invalidate()} would be one forgotten call away from a machine
+ * smelting an item its inputs no longer contain. {@link #isValidFor} instead compares a
+ * fingerprint of the slots, so a path that changes inputs without telling anyone still
+ * gets a fresh resolution.
+ *
+ * <p><b>The fingerprint compares values, not stack identity.</b> It once compared the
+ * {@code ItemStack} references themselves, which was sound while {@link MachineState}
+ * held its own array and handed out the very objects it stored. It no longer does:
+ * slots now live in a Bukkit {@link org.bukkit.inventory.Inventory}, and
+ * {@code Inventory#getItem} is specified to return <em>a</em> stack for the slot, not
+ * <em>the</em> stack -- CraftBukkit builds a fresh wrapper on every call. An identity
+ * comparison against that would fail on every tick, leaving the cache permanently
+ * invalid and re-resolving every recipe twenty times a second: not incorrect, but the
+ * exact cost this class exists to avoid, and silently so.
+ *
+ * <p>So each slot is fingerprinted by {@link Material}, amount, and
+ * {@link ItemStack#isSimilar} against a stored clone. That is strictly <em>stronger</em>
+ * than the identity rule it replaces: identity could not tell apart two different stacks
+ * of the same material and amount carrying different {@code ItemMeta} (a plain iron
+ * sword versus one another plugin has tagged in its PDC, which
+ * {@code MetalClassifier} resolves differently), and would happily reuse a resolution
+ * for the wrong one. {@code isSimilar} compares the metadata, so it does not.
  *
  * <p>The recycling settings and alloy registry are part of the fingerprint too, by
  * identity: {@code /electricfurnace reload} swaps both objects, and the resolution
@@ -52,8 +67,15 @@ final class RecipeCache {
 
     /**
      * Whether a stored resolution still describes {@code inputs} under
-     * {@code recycling}/{@code alloys}. Cheap enough to call every tick for every
-     * machine: five reference comparisons and two int reads, no allocation.
+     * {@code recycling}/{@code alloys}.
+     *
+     * <p>Ordered cheapest-test-first so the expensive comparison is reached only by a
+     * slot that already matches on both of the cheap ones: two reference comparisons and
+     * a null check reject a reloaded config or an emptied slot outright, {@link Material}
+     * and amount reject the overwhelmingly common real change (a player adding, removing,
+     * or swapping items), and {@link ItemStack#isSimilar} -- the only part that inspects
+     * metadata -- runs at most once per occupied slot per tick, on the path where the
+     * answer is "still valid, do not re-resolve."
      */
     boolean isValidFor(ItemStack[] inputs, Object recycling, Object alloys) {
         if (!populated || this.recycling != recycling || this.alloys != alloys) {
@@ -61,10 +83,17 @@ final class RecipeCache {
         }
         for (int i = 0; i < stacks.length; i++) {
             ItemStack current = i < inputs.length ? inputs[i] : null;
-            if (current != stacks[i]) {
+            ItemStack stored = stacks[i];
+            if (current == null || stored == null) {
+                if (current != stored) {
+                    return false;
+                }
+                continue;
+            }
+            if (current.getType() != materials[i] || current.getAmount() != amounts[i]) {
                 return false;
             }
-            if (current != null && (current.getType() != materials[i] || current.getAmount() != amounts[i])) {
+            if (!stored.isSimilar(current)) {
                 return false;
             }
         }
@@ -74,13 +103,18 @@ final class RecipeCache {
     /**
      * Stores a fresh resolution, fingerprinting {@code inputs} as it stands now.
      *
+     * <p>Each occupied slot is cloned. The stack handed in belongs to a Bukkit
+     * inventory, which may hand out a different wrapper -- or a genuinely different
+     * object -- on the next read, and may have its amount changed underneath us by the
+     * ticker's own completion step; a clone is a stable value to compare against.
+     *
      * @param candidate the item a completed run would deposit, or {@code null} when
      *                  {@code recipeValid} is {@code false}
      */
     void store(ItemStack[] inputs, Object recycling, Object alloys, boolean recipeValid, ItemStack candidate) {
         for (int i = 0; i < stacks.length; i++) {
             ItemStack current = i < inputs.length ? inputs[i] : null;
-            stacks[i] = current;
+            stacks[i] = current == null ? null : current.clone();
             materials[i] = current == null ? null : current.getType();
             amounts[i] = current == null ? 0 : current.getAmount();
         }

@@ -10,6 +10,7 @@
 package org.xpfarm.electricfurnace.machine;
 
 import org.bukkit.NamespacedKey;
+import org.bukkit.block.Block;
 import org.bukkit.inventory.ItemStack;
 
 import java.io.ByteArrayOutputStream;
@@ -30,6 +31,27 @@ import java.util.logging.Logger;
  *
  * <p><b>Never throws.</b> Malformed bytes decode to an empty machine and log a warning.
  * Throwing here would propagate into a chunk-load path.
+ *
+ * <h2>Only the functional slots are persisted</h2>
+ *
+ * <p>A {@link MachineState}'s items live in a 27-slot Bukkit inventory, but only seven of
+ * those slots -- five inputs, fuel, output -- are machine contents. The rest hold
+ * {@code FurnaceGui}'s filler panes and its status indicator, which are decoration
+ * regenerated from scratch whenever the GUI is drawn.
+ *
+ * <p>This codec deliberately encodes <b>only the seven functional slots</b>, addressed
+ * by name through {@link MachineState}'s accessors rather than by walking the inventory.
+ * Encoding all 27 would give every machine on the server a dozen glass panes and a
+ * redstone torch in its persisted state, on disk, forever -- and would make those
+ * decorations real, recoverable items rather than pixels. The decoration is already
+ * unreachable to a player ({@code MachineGuiListener} cancels every click on a FILLER or
+ * INDICATOR slot outright, and cancels view-wide {@code COLLECT_TO_CURSOR} on top of
+ * that), but a persistence layer that mints a pane into the world the moment any one of
+ * those guards is bypassed would turn a click-guard bug into an item-duplication bug.
+ * Not writing them down at all removes that coupling entirely.
+ *
+ * <p>A useful consequence: the wire format is byte-for-byte what it was before the
+ * inventory backed this state, so no migration and no version bump is needed.
  */
 public final class MachineStateCodec {
 
@@ -150,22 +172,31 @@ public final class MachineStateCodec {
 
     // ---- ItemStack adapter (needs a running server; not unit-tested) ----------------
 
-    /** Encodes a live state for storage in a block PDC. */
+    /**
+     * Encodes a live state for storage in a block PDC. Reads only the seven functional
+     * slots -- see the class note on why the inventory's decoration is not persisted.
+     */
     public static byte[] encode(MachineState state) {
+        ItemStack[] contents = state.inputs();
         byte[][] inputs = new byte[MachineState.INPUT_COUNT][];
         for (int i = 0; i < inputs.length; i++) {
-            inputs[i] = toBytes(state.inputs()[i]);
+            inputs[i] = toBytes(contents[i]);
         }
         return encodeFrame(new Frame(inputs, toBytes(state.fuel()), toBytes(state.output()),
                 state.progressTicks(), state.burnTicksRemaining()));
     }
 
-    /** Decodes bytes read from a block PDC into a live state. */
-    public static MachineState decode(byte[] bytes) {
+    /**
+     * Decodes bytes read from {@code block}'s PDC into a live state.
+     *
+     * <p>{@code block} is required because a {@link MachineState}'s storage <em>is</em> a
+     * Bukkit inventory bound to that block: decoding is what first populates it.
+     */
+    public static MachineState decode(Block block, byte[] bytes) {
         Frame frame = decodeFrame(bytes);
-        MachineState state = MachineState.empty();
+        MachineState state = MachineState.empty(block);
         for (int i = 0; i < MachineState.INPUT_COUNT; i++) {
-            state.inputs()[i] = fromBytes(frame.inputs()[i]);
+            state.setInput(i, fromBytes(frame.inputs()[i]));
         }
         state.setFuel(fromBytes(frame.fuel()));
         state.setOutput(fromBytes(frame.output()));

@@ -9,62 +9,161 @@
  */
 package org.xpfarm.electricfurnace.machine;
 
+import net.kyori.adventure.text.Component;
+import org.bukkit.Bukkit;
+import org.bukkit.Material;
+import org.bukkit.block.Block;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.xpfarm.electricfurnace.gui.GuiLayout;
+
+import java.util.Objects;
 
 /**
  * The persisted contents and run state of one Electric Furnace block.
  *
- * <p>Mutable by design: {@link MachineTicker} advances the same instance in place every
- * tick, and copying seven {@code ItemStack}s per machine per tick would be wasteful.
- * Ownership is single-threaded -- only the main-thread ticker and main-thread event
+ * <h2>The inventory is the storage, not a view of it</h2>
+ *
+ * <p>This class holds no {@code ItemStack} fields. Its items live in one Bukkit
+ * {@link Inventory}, created lazily per machine block and handed unchanged to every
+ * player who opens the GUI. There is therefore exactly one place a machine's items can
+ * be: a player's click writes the same slots {@link MachineTicker} reads and
+ * {@link MachineStateCodec} encodes.
+ *
+ * <p>That single location is what removes the entire class of bug this plugin used to
+ * defend against with deferred syncs, pending-sync counters, and skip guards. Bukkit
+ * finishes applying a click only after the event handler returns, so a handler cannot
+ * observe the click's own result -- but with one storage location it no longer needs to.
+ * Nothing has to be copied back anywhere, so there is no window in which two copies can
+ * disagree.
+ *
+ * <p>This class <b>is</b> the inventory's {@link InventoryHolder}, so any code holding a
+ * furnace GUI inventory can recover both the machine and its block with no store lookup.
+ *
+ * <h2>Slots are read and written, never aliased</h2>
+ *
+ * <p>{@link Inventory#getItem} is treated as returning a <em>snapshot</em>. The Bukkit
+ * API does not specify whether it returns a live reference or a copy -- CraftBukkit
+ * happens to return a fresh wrapper around the live stack, but nothing in the API
+ * promises that, and code that mutates the returned stack and never writes it back is
+ * correct only by implementation accident. Every mutation here and in
+ * {@link MachineTicker} is therefore read-modify-{@link Inventory#setItem write-back}.
+ *
+ * <p>The same rule is why {@link RecipeCache} can no longer fingerprint slots by stack
+ * identity: a fresh object per {@code getItem} call would make an identity comparison
+ * fail every tick and the cache dead weight. See that class for what replaced it.
+ *
+ * <p>Only the five input slots, the fuel slot, and the output slot are this machine's
+ * contents. The filler panes and status indicator that share the same inventory are
+ * decoration owned by {@code FurnaceGui}; they are never read here and never persisted
+ * -- see {@link MachineStateCodec}.
+ *
+ * <p>Ownership is single-threaded -- only the main-thread ticker and main-thread event
  * handlers touch it.
  */
-public final class MachineState {
+public final class MachineState implements InventoryHolder {
 
     /** Number of recycler input slots. Mirrors {@code GuiLayout.INPUT_SLOTS}. */
     public static final int INPUT_COUNT = 5;
 
-    private final ItemStack[] inputs = new ItemStack[INPUT_COUNT];
-    private ItemStack fuel;
-    private ItemStack output;
+    /** The five input slots in a fixed order, so slot {@code i} is always input {@code i}. */
+    private static final int[] INPUT_SLOTS_ORDERED = {
+            GuiLayout.INPUT_SLOT_1, GuiLayout.INPUT_SLOT_2, GuiLayout.INPUT_SLOT_3,
+            GuiLayout.INPUT_SLOT_4, GuiLayout.INPUT_SLOT_5
+    };
+
+    private final Block block;
+
+    /**
+     * This machine's one and only item storage, created on first use.
+     *
+     * <p>Lazy rather than eager purely so a {@code MachineState} can exist without a
+     * running server: {@link Bukkit#createInventory} cannot be called headlessly, but
+     * {@link #progressTicks()}, {@link #burnTicksRemaining()} and {@link #isIdle()} are
+     * ordinary integer logic that a unit test must still be able to reach. Every
+     * item-facing method below goes through {@link #getInventory()}, so the distinction
+     * is invisible in production, where the first hydration touches the slots
+     * immediately.
+     */
+    private Inventory inventory;
+
     private int progressTicks;
     private int burnTicksRemaining;
 
     /**
-     * This machine's memo of what {@link #inputs} currently resolve to. Kept here, not
+     * This machine's memo of what its input slots currently resolve to. Kept here, not
      * in {@link MachineTicker}, because it is per-machine and must outlive a single
-     * tick; it decides its own validity by re-reading {@link #inputs}, so nothing that
-     * writes to that array has to know it exists.
+     * tick; it decides its own validity by re-reading the input slots, so nothing that
+     * writes to them has to know it exists.
      */
     private final RecipeCache recipeCache = new RecipeCache();
 
-    private MachineState() {
+    private MachineState(Block block) {
+        this.block = Objects.requireNonNull(block, "block");
     }
 
     /** A machine with nothing in it and no run in progress. */
-    public static MachineState empty() {
-        return new MachineState();
+    public static MachineState empty(Block block) {
+        return new MachineState(block);
     }
 
-    /** The live input slot array. Entries may be {@code null}; length is always {@link #INPUT_COUNT}. */
+    /** The Electric Furnace block these contents belong to. */
+    public Block block() {
+        return block;
+    }
+
+    /**
+     * This machine's item storage, created on first call. The same instance is returned
+     * for the life of this state, and is what {@code FurnaceGui.open} hands to every
+     * viewer -- so two players watching one machine are literally editing one object.
+     */
+    @Override
+    public Inventory getInventory() {
+        if (inventory == null) {
+            inventory = Bukkit.createInventory(this, GuiLayout.SIZE, Component.text(GuiLayout.TITLE_TEXT));
+        }
+        return inventory;
+    }
+
+    /**
+     * A snapshot of the five input slots, in slot order. Entries are {@code null} for an
+     * empty slot; length is always {@link #INPUT_COUNT}.
+     *
+     * <p>A snapshot, <b>not</b> a live array: writing into the returned array changes
+     * nothing. Use {@link #setInput} to change a slot.
+     */
     public ItemStack[] inputs() {
-        return inputs;
+        ItemStack[] snapshot = new ItemStack[INPUT_COUNT];
+        Inventory contents = getInventory();
+        for (int i = 0; i < INPUT_COUNT; i++) {
+            snapshot[i] = normalizeAir(contents.getItem(INPUT_SLOTS_ORDERED[i]));
+        }
+        return snapshot;
+    }
+
+    /** Replaces one input slot's contents. {@code null} empties it. */
+    public void setInput(int index, ItemStack item) {
+        if (index < 0 || index >= INPUT_COUNT) {
+            throw new IllegalArgumentException("input index " + index + " is outside [0, " + INPUT_COUNT + ")");
+        }
+        getInventory().setItem(INPUT_SLOTS_ORDERED[index], item);
     }
 
     public ItemStack fuel() {
-        return fuel;
+        return normalizeAir(getInventory().getItem(GuiLayout.FUEL_SLOT));
     }
 
     public void setFuel(ItemStack fuel) {
-        this.fuel = fuel;
+        getInventory().setItem(GuiLayout.FUEL_SLOT, fuel);
     }
 
     public ItemStack output() {
-        return output;
+        return normalizeAir(getInventory().getItem(GuiLayout.OUTPUT_SLOT));
     }
 
     public void setOutput(ItemStack output) {
-        this.output = output;
+        getInventory().setItem(GuiLayout.OUTPUT_SLOT, output);
     }
 
     public int progressTicks() {
@@ -91,5 +190,13 @@ public final class MachineState {
     /** Whether no run is currently in progress. Drives the input lock. */
     public boolean isIdle() {
         return progressTicks == 0;
+    }
+
+    /**
+     * Bukkit slots report an empty stack as either {@code null} or {@code AIR} depending
+     * on the path taken; normalize to {@code null} so every caller has one empty case.
+     */
+    static ItemStack normalizeAir(ItemStack item) {
+        return (item == null || item.getType() == Material.AIR) ? null : item;
     }
 }
