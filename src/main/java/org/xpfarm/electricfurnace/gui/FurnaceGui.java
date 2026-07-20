@@ -198,8 +198,13 @@ public final class FurnaceGui {
         return inventory;
     }
 
-    /** The currently-open shared GUI inventory for {@code block}, if any online player has it open. */
-    private static Optional<Inventory> findOpenInventory(Block block) {
+    /**
+     * The currently-open shared GUI inventory for {@code block}, if any online player
+     * has it open. Public because {@code MachineStore#flush} also calls this, to fold
+     * a currently-open GUI's edits into state right before encoding it -- see the note
+     * there on the deferred-sync window this closes.
+     */
+    public static Optional<Inventory> findOpenInventory(Block block) {
         for (Player viewer : Bukkit.getOnlinePlayers()) {
             Inventory top = viewer.getOpenInventory().getTopInventory();
             if (blockOf(top).filter(block::equals).isPresent()) {
@@ -260,6 +265,38 @@ public final class FurnaceGui {
     /** Bukkit slots report an empty stack as either {@code null} or {@code AIR} depending on the path taken; normalize to {@code null}. */
     private static ItemStack normalizeAir(ItemStack item) {
         return (item == null || item.getType() == Material.AIR) ? null : item;
+    }
+
+    /**
+     * The inverse direction from {@link #syncToState}: pushes {@code state}'s current
+     * input/fuel/output arrays into {@code inventory}'s slots, then redraws the status
+     * indicator.
+     *
+     * <p>{@link #buildInventory} already does the input/fuel/output half of this once,
+     * via {@link #populateFromState}, when a fresh inventory is first built. This
+     * public entry point exists for a different caller: a driver (the future
+     * {@code MachineTicker}) that mutates a machine's {@link MachineState} -- consuming
+     * inputs, producing output -- <em>while</em> a viewer already has that block's GUI
+     * open. Without pushing the change back into the shared {@code Inventory}, the
+     * open GUI would keep showing stale, pre-tick contents; worse, {@code MachineState}
+     * always permits taking from the output slot, so the very next click there would
+     * trigger {@code MachineGuiListener#scheduleSync}'s {@link #syncToState}, which
+     * would write that stale inventory back over the state -- resurrecting inputs the
+     * ticker already consumed and erasing output it already produced.
+     *
+     * <p>Not called anywhere yet: no ticker mutates a live {@code MachineState} under
+     * an open GUI today. Wiring an actual call is the future ticker's responsibility;
+     * this method only needs to exist and be correct so that work has something to
+     * call.
+     */
+    public static void refreshFromState(Inventory inventory, MachineState state, EfConfig config, boolean powered) {
+        Objects.requireNonNull(inventory, "inventory");
+        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(config, "config");
+
+        populateFromState(inventory, state);
+        refreshIndicator(inventory, config, powered, !state.isIdle(), state.progressTicks(),
+                config.machine().smeltTicks());
     }
 
     /**
@@ -455,28 +492,80 @@ public final class FurnaceGui {
      * items to belong to -- unlike a normal close, which folds the inventory into the
      * machine's state (see {@link #syncToState}), this returns them straight to the
      * viewer. Items are returned <em>before</em> {@link Player#closeInventory()} is
-     * called, exactly like {@link #closeAll} already does, rather than relying on
-     * {@code InventoryCloseEvent} to do it: that keeps this method correct regardless
-     * of whether the close handler also runs.
+     * called, exactly like {@link #closeAll} already does.
      *
-     * <p><b>Why this never duplicates with {@code MachineBlockListener}'s
-     * {@code dropStoreContents}.</b> That method separately drops whatever is already
-     * in the block's {@code MachineState} once this method returns. This method empties
-     * every returned slot in the live {@code Inventory} as it goes, exactly like
-     * {@link #returnAllItems} always has; when {@code player.closeInventory()} then
-     * fires {@code InventoryCloseEvent}, {@code MachineGuiListener#onClose} syncs that
-     * now-emptied inventory into {@code MachineState}, so {@code dropStoreContents}
-     * finds nothing left there for whatever was just handed to the viewer.
+     * <p><b>Does not depend on {@code InventoryCloseEvent}.</b> If any viewer's items
+     * were returned, {@code block}'s state in {@code store} is cleared directly (via
+     * {@link MachineStore#forget}) before this method returns. Earlier, this method's
+     * correctness against {@code MachineBlockListener}'s {@code dropStoreContents}
+     * relied on {@code player.closeInventory()} firing {@code InventoryCloseEvent},
+     * which {@code MachineGuiListener#onClose} used to sync the now-emptied inventory
+     * into {@code MachineState} -- a dependency that was silently false whenever that
+     * event did not reach {@code onClose}: {@code MachineState} would still hold the
+     * items just handed to the viewer, and {@code dropStoreContents} would then drop
+     * those same items on the ground too, duplicating them. Calling
+     * {@link MachineStore#forget} here removes that dependency: {@code store} always
+     * knows this block's state is now empty, event or no event.
+     *
+     * @param store the machine state store, or {@code null} if it failed to wire up.
+     *              Items are still returned when {@code store} is {@code null}; only
+     *              the state-clearing step is skipped, since there is nothing to clear.
      */
-    public static void closeForBlock(Block block) {
+    public static void closeForBlock(Block block, MachineStore store) {
         Objects.requireNonNull(block, "block");
+        boolean returnedAny = false;
         for (Player player : Bukkit.getOnlinePlayers()) {
             Inventory top = player.getOpenInventory().getTopInventory();
             if (top.getHolder() instanceof Holder holder && holder.block().equals(block)) {
                 returnAllItems(top, player);
                 player.closeInventory();
+                returnedAny = true;
             }
         }
+        if (returnedAny && store != null) {
+            store.forget(block);
+        }
+    }
+
+    /** One step of the per-viewer shutdown sequence performed by {@link #closeAll}. */
+    public enum CloseAllStep {
+        /**
+         * Sync the inventory into machine state and flush it to the block's PDC.
+         * Already attempted by {@link #closeAll} before this list is consulted --
+         * {@link #closeAllSteps} takes the outcome as a parameter rather than deciding
+         * it, since deciding it requires the Bukkit/PDC call that cannot be made from
+         * pure data. This step exists in the sequence so the ordering guarantee below
+         * is enforced by an exhaustive {@code switch} over the enum, not restated.
+         */
+        PERSIST,
+        /**
+         * Clear the block's persisted state (nothing may be left duplicated in the
+         * PDC), then return every item directly to the viewer.
+         */
+        RETURN,
+        /** Close the now-settled inventory. */
+        CLOSE
+    }
+
+    /**
+     * The ordered steps {@link #closeAll} performs for one viewer, given whether
+     * persisting that viewer's machine succeeded.
+     *
+     * <p>Extracted as data, and driven directly by {@link #closeAll}, so the property
+     * that keeps shutdown from ever losing <em>or</em> duplicating an item is pinned by
+     * a unit test with no server: the item-safety step ({@link CloseAllStep#PERSIST} or
+     * {@link CloseAllStep#RETURN}) always comes before {@link CloseAllStep#CLOSE}.
+     * Reordering it after {@code CLOSE} would put us back to relying on an
+     * {@code InventoryCloseEvent} that never fires during {@code onDisable} -- see
+     * {@link #closeAll}'s note on why that dependency is unsafe here. This restores,
+     * for both branches {@code closeAll} now has, the same guarantee the original
+     * (pre-persistence) {@code ShutdownStep}/{@code shutdownSteps()} pinned for its one
+     * unconditional branch.
+     */
+    public static List<CloseAllStep> closeAllSteps(boolean persistSucceeded) {
+        return persistSucceeded
+                ? List.of(CloseAllStep.PERSIST, CloseAllStep.CLOSE)
+                : List.of(CloseAllStep.RETURN, CloseAllStep.CLOSE);
     }
 
     /**
@@ -487,10 +576,15 @@ public final class FurnaceGui {
      * <p>For each open GUI, this makes one more attempt to fold its current contents
      * into its machine's state and flush that state to the block's PDC directly --
      * closing the gap between "flushAll already ran" and "this particular inventory
-     * had unsynced edits sitting in it at that exact moment." Only if that attempt
-     * throws (or {@code store} itself failed to wire up) does this fall back to
-     * {@link #returnAllItems}, exactly like the pre-persistence model did
-     * unconditionally. Neither path relies on {@code InventoryCloseEvent}: Bukkit
+     * had unsynced edits sitting in it at that exact moment." The outcome selects which
+     * branch of {@link #closeAllSteps} runs: on success, nothing more needs to happen
+     * to the block's state (already flushed) before closing; on failure -- including
+     * when {@code store} itself failed to wire up -- the block's state is cleared via
+     * {@link MachineStore#forget} <em>before</em> the items are returned directly to
+     * the viewer, exactly like the pre-persistence model did unconditionally. That
+     * clearing step is what stops a machine whose earlier {@code flushAll()} already
+     * succeeded from ending up with its contents in both the block's PDC and the
+     * player's inventory. Neither branch relies on {@code InventoryCloseEvent}: Bukkit
      * clears {@code isEnabled} <em>before</em> invoking {@code onDisable()}, and
      * {@code SimplePluginManager#fireEvent} skips every {@code RegisteredListener}
      * belonging to a disabled plugin, so {@code MachineGuiListener#onClose} never runs
@@ -502,15 +596,34 @@ public final class FurnaceGui {
             if (!(top.getHolder() instanceof Holder holder)) {
                 continue;
             }
-            if (!persist(top, holder.block(), store)) {
-                returnAllItems(top, player);
+            Block block = holder.block();
+            boolean persisted = persist(top, block, store);
+            for (CloseAllStep step : closeAllSteps(persisted)) {
+                switch (step) {
+                    case PERSIST -> {
+                        // Nothing further to do -- persisted (computed above) already
+                        // captures that this attempt succeeded.
+                    }
+                    case RETURN -> {
+                        if (store != null) {
+                            store.forget(block);
+                        }
+                        returnAllItems(top, player);
+                    }
+                    case CLOSE -> player.closeInventory();
+                }
             }
-            player.closeInventory();
         }
     }
 
     /** Attempts to sync {@code inventory} into its machine's state and flush that state to disk. */
     private static boolean persist(Inventory inventory, Block block, MachineStore store) {
+        // store can be null here even though FurnaceGui itself never stores it: this is
+        // a static utility, and ElectricFurnacePlugin#onDisable calls closeAll(store)
+        // unconditionally -- including when the "machine store" wiring step in onEnable
+        // failed and the field was never assigned. Calling closeAll in that case is
+        // still correct (items must still be returned to viewers); this check is what
+        // makes that safe rather than an NPE the catch below would otherwise mask.
         if (store == null) {
             return false;
         }

@@ -19,6 +19,7 @@ import org.bukkit.event.world.WorldSaveEvent;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
+import org.xpfarm.electricfurnace.gui.FurnaceGui;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -131,6 +132,25 @@ public final class MachineStore implements Listener {
      * Writes {@code block}'s live state back to its PDC, if it has one in memory. A
      * no-op for a block that was never {@link #get(Block) accessed} and for a block
      * that is not a {@link TileState}.
+     *
+     * <h3>Closing the deferred-sync window</h3>
+     *
+     * <p>{@code MachineGuiListener} folds a click's item movement into a machine's
+     * {@link MachineState} one tick <em>after</em> the click, because Bukkit only
+     * finishes applying the move once its own event handler returns. A
+     * {@link WorldSaveEvent} or {@link ChunkUnloadEvent} landing inside that one-tick
+     * window would otherwise flush state one edit behind whatever is actually sitting
+     * in the open GUI -- an item just placed into an input slot (already gone from the
+     * player's inventory) could exist nowhere; an item just taken from the output slot
+     * (an OUTPUT take is always permitted) could exist both in the player's inventory
+     * and, stale, in this flush. Before encoding, this method folds any
+     * currently-open GUI for {@code block} into {@code state} directly (see
+     * {@link FurnaceGui#findOpenInventory}/{@link FurnaceGui#syncToState}), closing
+     * that window without changing the one-tick deferral and without a polling task.
+     * That sync attempt is best-effort: a failure there is logged and does not stop
+     * the (possibly one-tick-stale, but still valid) in-memory state from reaching
+     * disk -- this method must stay fail-soft and non-throwing, since it runs on the
+     * chunk-unload path.
      */
     public void flush(Block block) {
         Objects.requireNonNull(block, "block");
@@ -140,6 +160,12 @@ public final class MachineStore implements Listener {
         }
         if (!(block.getState() instanceof TileState tile)) {
             return;
+        }
+        try {
+            FurnaceGui.findOpenInventory(block).ifPresent(inventory -> FurnaceGui.syncToState(inventory, state));
+        } catch (Throwable t) {
+            warn("failed to sync an open GUI into machine state before flushing at " + describe(block) + " ("
+                    + t.getClass().getName() + ": " + t.getMessage() + "); flushing the last known state instead.");
         }
         PersistentDataContainer pdc = tile.getPersistentDataContainer();
         pdc.set(MachineStateCodec.KEY, PersistentDataType.BYTE_ARRAY, MachineStateCodec.encode(state));

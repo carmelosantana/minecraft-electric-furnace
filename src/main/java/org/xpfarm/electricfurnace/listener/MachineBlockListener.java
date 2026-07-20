@@ -106,7 +106,7 @@ public final class MachineBlockListener implements Listener {
 
         // Return any open viewer's items BEFORE the block (and its virtual inventory)
         // are gone -- never destroy items by breaking the block out from under an open GUI.
-        FurnaceGui.closeForBlock(block);
+        FurnaceGui.closeForBlock(block, store);
 
         // The machine's own persisted contents -- separate from whatever a viewer's GUI
         // held -- must hit the ground before the store forgets them and the block stops
@@ -175,7 +175,7 @@ public final class MachineBlockListener implements Listener {
         blockList.removeAll(machineBlocks);
 
         for (Block block : machineBlocks) {
-            FurnaceGui.closeForBlock(block);
+            FurnaceGui.closeForBlock(block, store);
             dropStoreContents(block);
             store.forget(block);
             machines.unregister(block);

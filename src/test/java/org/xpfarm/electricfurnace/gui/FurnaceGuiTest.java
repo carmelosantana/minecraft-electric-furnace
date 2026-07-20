@@ -11,6 +11,8 @@ package org.xpfarm.electricfurnace.gui;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -274,5 +276,55 @@ class FurnaceGuiTest {
                         () -> "overflowed destination: dest=" + finalDest + " moved=" + moved);
             }
         }
+    }
+
+    // ---- Review fix pass 1, finding 4: closeAll's shutdown step ordering -------------
+    //
+    // Restores the property the deleted ShutdownStep/shutdownSteps() pair used to pin:
+    // the item-safety step (persist, or return-to-player) must never come after the
+    // inventory is closed. closeAll now has two branches instead of one unconditional
+    // sequence, so both are asserted here.
+
+    @Test
+    void closeAllSteps_whenPersistSucceeded_isPersistThenClose() {
+        assertEquals(
+                List.of(FurnaceGui.CloseAllStep.PERSIST, FurnaceGui.CloseAllStep.CLOSE),
+                FurnaceGui.closeAllSteps(true));
+    }
+
+    @Test
+    void closeAllSteps_whenPersistFailed_isReturnThenClose() {
+        assertEquals(
+                List.of(FurnaceGui.CloseAllStep.RETURN, FurnaceGui.CloseAllStep.CLOSE),
+                FurnaceGui.closeAllSteps(false));
+    }
+
+    @Test
+    void closeAllSteps_itemSafetyStepAlwaysPrecedesClose_inBothBranches() {
+        for (boolean persistSucceeded : new boolean[] {true, false}) {
+            List<FurnaceGui.CloseAllStep> steps = FurnaceGui.closeAllSteps(persistSucceeded);
+            int closeIndex = steps.indexOf(FurnaceGui.CloseAllStep.CLOSE);
+            assertTrue(closeIndex >= 0, () -> "CLOSE missing for persistSucceeded=" + persistSucceeded);
+            for (int i = 0; i < steps.size(); i++) {
+                FurnaceGui.CloseAllStep step = steps.get(i);
+                boolean isItemSafetyStep =
+                        step == FurnaceGui.CloseAllStep.PERSIST || step == FurnaceGui.CloseAllStep.RETURN;
+                int finalI = i;
+                boolean finalPersistSucceeded = persistSucceeded;
+                if (isItemSafetyStep) {
+                    assertTrue(finalI < closeIndex, () -> "item-safety step " + step
+                            + " did not precede CLOSE for persistSucceeded=" + finalPersistSucceeded);
+                }
+            }
+        }
+    }
+
+    @Test
+    void closeAllSteps_neverProducesReturnAndPersistTogether() {
+        // Exactly one item-safety step per branch -- never both, never neither.
+        assertEquals(2, FurnaceGui.closeAllSteps(true).size());
+        assertEquals(2, FurnaceGui.closeAllSteps(false).size());
+        assertFalse(FurnaceGui.closeAllSteps(true).contains(FurnaceGui.CloseAllStep.RETURN));
+        assertFalse(FurnaceGui.closeAllSteps(false).contains(FurnaceGui.CloseAllStep.PERSIST));
     }
 }
