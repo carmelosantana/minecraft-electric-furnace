@@ -675,7 +675,7 @@ recorded below is what was actually established, and what was not.
 
 **Deliberately held open, 2026-07-20. Not a missing step — a blocked one.**
 
-`minecraft-plugin-handoff` writes to `minecraft-plugin-docs/CURRENT_STATE.md`, and that
+`minecraft-plugin-handoff` writes to `xpfarm-plugin-toolkit/CURRENT_STATE.md`, and that
 repository is mid-flight on another workstream: checked out on branch
 `test/docker-rig-consolidation` with 5+ unmerged commits consolidating the shared docker
 test rig, plus an untracked `docs/superpowers/plans/2026-07-19-console-dns.md` this pass
