@@ -336,6 +336,20 @@ pass (continuous-operation, targeting `0.2.0`) replaces them immediately below.
 
 ## 7. Matrix
 
+### 7a — `0.2.1` delta — NOT re-verified live, deliberately
+
+`0.2.1` adds a Machine block to `/electricfurnace info` and changes nothing else --
+no behaviour, no config format, no persistence. The rendering is a pure function
+(`ElectricFurnaceCommand.machineInfoLines`) covered by six headless tests and verified
+by mutation: hardcoding the items-per-dust ratio kills two tests, removing the
+zero-duration guard kills one.
+
+**No disposable stack was booted for `0.2.1`.** Docker work on the shared rig was queued
+behind this release, and starting a second stack risked interfering with it. The live
+send path is one `sendMessage` per returned line, so the untested surface is that loop
+alone. The `0.2.0` runtime verification below stands; `/electricfurnace info` was
+exercised live there, and this change alters only what it prints.
+
 ### 7a — Single-plugin runtime verification (this plugin only) — PASSED for `0.2.0`
 
 Verified in two parts on 2026-07-20.
@@ -483,6 +497,12 @@ pass can produce.
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
   - `.github/workflows/build.yml` copied byte-for-byte from the CopperKingdom reference, which matches `GITHUB_ACTIONS.md`. Triggers: push to `main`, `v*` tags, PRs targeting `main`, `workflow_dispatch`. `actions/checkout@v7`, `actions/setup-java@v5` (Temurin 25, Maven cache), `mvn --batch-mode --no-transfer-progress clean verify`, `SHA256SUMS.txt` excluding `original-*`, `actions/upload-artifact@v7`, tag-gated `gh release view`/`create`/`upload --clobber`.
 - [x] Successful main Actions run is recorded before tagging.
+  - **`0.2.1`:** run
+    [29829903616](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29829903616)
+    on `main` (commit `848c22e`) completed **success** with the full 311-test suite.
+    The `v0.2.1` tag run also succeeded. Release assets are exactly
+    `electric-furnace-0.2.1.jar` + `SHA256SUMS.txt`, no `original-*.jar` leak, and
+    `sha256sum --check` returns `electric-furnace-0.2.1.jar: OK`.
   - **`0.2.0`:** run
     [29765656324](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29765656324)
     on `main` (merge commit `6ac4d36`) completed **success**, building the full
