@@ -6,7 +6,7 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 - Slug: `electric-furnace`
 - Repository: `carmelosantana/minecraft-electric-furnace`
 - Owner: `Carmelo Santana`
-- Target version: `0.2.0`
+- Target version: `0.2.1`
 - Paper version: `26.1.2 build 74`
 - Java version: `25`
 - Updater destination: `electric-furnace.jar`
@@ -54,7 +54,7 @@ to go.
 | `/electricfurnace give` | `[player] [amount]` | `electricfurnace.give` (op) | Issue the machine item |
 | `/electricfurnace alloy` | `<id> [amount]` | `electricfurnace.give` (op) | Issue an alloy ingot, for testing |
 | `/electricfurnace reload` | — | `electricfurnace.reload` (op) | Reload config |
-| `/electricfurnace info` | — | `electricfurnace.use` (true) | Show alloy recipes and yields |
+| `/electricfurnace info` | — | `electricfurnace.use` (true) | Show machine tuning, yields, and alloy recipes |
 
 ### Events
 

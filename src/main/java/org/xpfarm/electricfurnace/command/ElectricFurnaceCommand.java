@@ -460,6 +460,15 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
         AlloyRegistry alloys = alloysSupplier.get();
 
         sender.sendMessage(Component.text("Electric Furnace").color(NamedTextColor.AQUA));
+        sender.sendMessage(Component.text("Machine (from config.yml):").color(NamedTextColor.GRAY));
+        for (String line : machineInfoLines(
+                config.machine().smeltSpeedMultiplier(),
+                config.machine().smeltTicks(),
+                config.machine().burnTicksPerRedstone(),
+                config.machine().requireRedstoneSignal())) {
+            sender.sendMessage(Component.text(line).color(NamedTextColor.WHITE));
+        }
+
         sender.sendMessage(Component.text("Yields (from config.yml):").color(NamedTextColor.GRAY));
         sender.sendMessage(Component.text("  same metal    " + config.recycling().yieldSameMetal()
                 + " ingots").color(NamedTextColor.WHITE));
@@ -478,6 +487,47 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
             sender.sendMessage(Component.text("  " + definition.id() + "  ("
                     + definition.displayName() + ")  <- " + inputs).color(NamedTextColor.WHITE));
         }
+    }
+
+    /**
+     * The machine block of {@code /electricfurnace info}, as plain strings.
+     *
+     * <p>Reports each configured value together with what it actually works out to in
+     * play, because the raw setting is not the number an operator balances against. A
+     * speed multiplier means nothing without the resulting seconds per item, and
+     * {@code burn-ticks-per-redstone} means nothing without how many items one dust
+     * therefore smelts -- that last figure is the machine's whole economy, and it is a
+     * ratio of two separate config keys, so nothing else in the plugin surfaces it.
+     *
+     * <p>Pure, and takes primitives rather than {@code MachineSettings}, so the
+     * derivations are pinned by a headless test -- the same pattern as
+     * {@link #targetNameCandidates}. Bukkit types cannot be constructed in tests here.
+     *
+     * @param multiplier          the configured {@code machine.smelt-speed-multiplier}
+     * @param smeltTicks          per-item smelt duration implied by that multiplier
+     * @param burnTicksPerRedstone ticks of burn one redstone dust buys
+     * @param requireSignal       whether a redstone signal gates the machine
+     */
+    static List<String> machineInfoLines(double multiplier, int smeltTicks,
+                                         int burnTicksPerRedstone, boolean requireSignal) {
+        List<String> lines = new ArrayList<>();
+        lines.add(String.format("  smelt speed   %sx  (%d ticks, %.1fs per item)",
+                trimTrailingZero(multiplier), smeltTicks, smeltTicks / 20.0D));
+        // Guard the division rather than trusting the validated range. This is double
+        // division, so a zero would not throw -- it would quietly render "Infinity
+        // items", which reads as a real figure. Omitting the ratio is the honest failure.
+        String perDust = smeltTicks > 0
+                ? String.format("  (%.1f items)", (double) burnTicksPerRedstone / smeltTicks)
+                : "";
+        lines.add(String.format("  redstone      %d ticks per dust%s", burnTicksPerRedstone, perDust));
+        lines.add("  signal        " + (requireSignal ? "required" : "not required"));
+        return lines;
+    }
+
+    /** Renders {@code 2.5} as {@code "2.5"} but {@code 3.0} as {@code "3"}. */
+    private static String trimTrailingZero(double value) {
+        String text = String.format("%.1f", value);
+        return text.endsWith(".0") ? text.substring(0, text.length() - 2) : text;
     }
 
     /**

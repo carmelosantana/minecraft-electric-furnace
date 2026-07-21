@@ -442,4 +442,77 @@ class CommandArgsTest {
             assertTrue(message.toLowerCase(java.util.Locale.ROOT).contains("no players"), message);
         }
     }
+
+    @Nested
+    @DisplayName("machineInfoLines")
+    class MachineInfoLines {
+
+        private String joined(double multiplier, int smeltTicks, int burnTicks, boolean requireSignal) {
+            return String.join("\n",
+                    ElectricFurnaceCommand.machineInfoLines(multiplier, smeltTicks, burnTicks, requireSignal));
+        }
+
+        @Test
+        @DisplayName("reports the multiplier alongside the seconds it actually works out to")
+        void defaults_reportSpeedInTicksAndSeconds() {
+            String out = joined(2.5D, 80, 200, true);
+
+            assertTrue(out.contains("2.5x"), out);
+            assertTrue(out.contains("80 ticks"), out);
+            // 80 ticks is 4 seconds. The seconds figure is the point of the line: it is
+            // what an operator compares against a vanilla furnace's 10s.
+            assertTrue(out.contains("4.0s"), out);
+        }
+
+        @Test
+        @DisplayName("derives items-per-dust, which no single config key states")
+        void defaults_reportItemsPerDust() {
+            // 200 burn ticks / 80 ticks per item = 2.5 items from one redstone dust.
+            String out = joined(2.5D, 80, 200, true);
+
+            assertTrue(out.contains("200 ticks per dust"), out);
+            assertTrue(out.contains("2.5 items"), out);
+        }
+
+        @Test
+        @DisplayName("items-per-dust tracks both keys, not just the burn setting")
+        void slowerSmelt_yieldsFewerItemsPerDust() {
+            // Same dust, half the speed: one dust must now buy half as many items.
+            String fast = joined(2.5D, 80, 200, true);
+            String slow = joined(1.25D, 160, 200, true);
+
+            assertTrue(fast.contains("2.5 items"), fast);
+            assertTrue(slow.contains("1.3 items"), slow);
+        }
+
+        @Test
+        @DisplayName("a whole-number multiplier drops its trailing zero")
+        void wholeMultiplier_rendersWithoutDecimal() {
+            String out = joined(3.0D, 67, 200, true);
+
+            assertTrue(out.contains("3x"), out);
+            assertFalse(out.contains("3.0x"), out);
+        }
+
+        @Test
+        @DisplayName("reports whether a redstone signal is required, both ways")
+        void signalRequirement_isReportedBothWays() {
+            assertTrue(joined(2.5D, 80, 200, true).contains("required"), "required case");
+
+            String off = joined(2.5D, 80, 200, false);
+            assertTrue(off.contains("not required"), off);
+        }
+
+        @Test
+        @DisplayName("a zero smelt duration omits items-per-dust instead of dividing by zero")
+        void zeroSmeltTicks_omitsItemsPerDustRatherThanThrowing() {
+            // Double division by zero yields Infinity rather than throwing, so the
+            // failure this guards against is "Infinity items" printed as though it were
+            // a real number -- worse than showing nothing, because a player would read it.
+            String out = joined(2.5D, 0, 200, true);
+
+            assertTrue(out.contains("200 ticks per dust"), out);
+            assertFalse(out.contains("items"), out);
+        }
+    }
 }
