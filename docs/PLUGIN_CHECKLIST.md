@@ -336,23 +336,42 @@ pass (continuous-operation, targeting `0.2.0`) replaces them immediately below.
 
 ## 7. Matrix
 
-### 7a — Single-plugin runtime verification (this plugin only) — OUTSTANDING for `0.2.0`
+### 7a — Single-plugin runtime verification (this plugin only) — PASSED for `0.2.0`
 
-**Not re-run against the continuous-operation branch.** This fix pass is a code and
-documentation fix pass, not a release cut, and did not boot a Legendary stack or
-join a client. Everything continuous operation changes at runtime -- chunk-load
-hydration actually resuming a mid-smelt machine, burn time actually draining as
-configured, input-slot locking actually blocking a click, hopper cancellation
-actually firing, block-PDC persistence actually surviving a real chunk unload/reload
--- is unverified by live observation and rests on unit tests and code review only.
-This must be re-run by `minecraft-plugin-dev` (or equivalent) before `0.2.0` ships,
-and specifically must observe: a machine mid-smelt surviving a chunk unload and
-reload with nobody watching (the branch's headline claim), burn time draining only
-while a run advances, locked input slots under a live click, and a hopper transfer
-being cancelled against the machine's vanilla inventory.
+Verified in two parts on 2026-07-20.
+
+**Part 1 — automated, disposable Legendary stack.** Ports 25570/19140 leased by hand
+(`xpfarm-slot` is not installed on this machine). Fresh volume, torn down and volume
+removed after the run. RCON was enabled manually on the container to reach the console;
+it is not published by `docker-compose.yml`.
+
+- Loads clean on Paper 26.1.2 + Geyser 2.11.0 + Floodgate 2.2.5 + ViaVersion 5.11.0:
+  `ElectricFurnace enabled (5 alloys, effects on, ticker on)`. No plugin warnings or
+  exceptions on enable, disable, or a full stop/start cycle.
+- **No `Failed to get Spigot's CommandMap`** — this closes the open ecosystem question
+  about whether Bedrock players see command help text. They do.
+- `/electricfurnace info` and `/electricfurnace reload` both work from console.
+- Config validation observed live: an out-of-range `machine.smelt-speed-multiplier`
+  of `99.0` warned naming the key, the value, and the default, then fell back to `2.5`;
+  the removed `machine.fuel-per-operation` key warned naming its replacement rather
+  than being silently ignored. Restoring the config reloaded with no warnings.
+
+**Part 2 — operator, live clients on both platforms.** The operator confirmed the
+continuous-operation behaviours work on **both Java and Bedrock**: placing and using a
+machine, smelting over time, burn-time drain, input locking, two viewers on one
+inventory, the double-click vacuum guard, shift-click routing, and chunk unload/reload
+mid-run.
+
+**One check not run:** restarting the server with an *alloy* item sitting in a machine's
+output slot. Alloy items carry custom `ItemMeta` and PDC, so they exercise the
+`MachineStateCodec` `ItemStack`↔bytes round-trip more heavily than a plain ingot does.
+Plain-item persistence across restart was verified; the alloy-specific round-trip rests
+on unit tests. Low risk (the codec is type-agnostic and uses
+`ItemStack.serializeAsBytes`), but it is not observed, and is recorded here rather than
+claimed.
 
 The evidence below is retained as history for `v0.1.0`/`v0.1.1` (pre-continuous-
-operation) and does not stand in for the run above.
+operation).
 
 ### Historical (v0.1.0) — PASSED
 
@@ -418,8 +437,8 @@ should not be read as evidence about it.
 
 - [x] Each updater-managed plugin's manifest `enabled` value, default state, and expected fresh-volume behavior are recorded separately.
 - [x] Paper, Geyser, Floodgate, and ViaVersion start successfully together.
-- [ ] Java and Bedrock smoke tests cover joins plus affected commands, events, permissions, persistence, and reloads where feasible.
-  - **Not done.** No client join was performed in this matrix run; see the 7a caveats.
+- [x] Java and Bedrock smoke tests cover joins plus affected commands, events, permissions, persistence, and reloads where feasible.
+  - Covered for this plugin by gate 7a part 2 (operator, live Java and Bedrock clients, 2026-07-20). Still **not** evidence about the ten-plugin matrix, which has not been re-run since `0.2.0`.
 - [x] Public deployment smoke tests verify `play.xpfarm.org` reaches the intended Java and Bedrock entry points.
   - DNS resolves to `168.231.74.113`; Java TCP 25565 and Bedrock UDP 19132 both reachable.
 - [x] Ollama and Umami unavailable-endpoint tests keep the server and plugins available when applicable.
@@ -463,8 +482,18 @@ pass can produce.
 
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
   - `.github/workflows/build.yml` copied byte-for-byte from the CopperKingdom reference, which matches `GITHUB_ACTIONS.md`. Triggers: push to `main`, `v*` tags, PRs targeting `main`, `workflow_dispatch`. `actions/checkout@v7`, `actions/setup-java@v5` (Temurin 25, Maven cache), `mvn --batch-mode --no-transfer-progress clean verify`, `SHA256SUMS.txt` excluding `original-*`, `actions/upload-artifact@v7`, tag-gated `gh release view`/`create`/`upload --clobber`.
-- [ ] Successful main Actions run is recorded before tagging.
-  - **Not yet true for `0.2.0`.** Historical evidence for `0.1.0`/`0.1.1` only: run
+- [x] Successful main Actions run is recorded before tagging.
+  - **`0.2.0`:** run
+    [29765656324](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29765656324)
+    on `main` (merge commit `6ac4d36`) completed **success**, building the full
+    305-test suite on Temurin 25. The tag run
+    [29765667140](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29765667140)
+    also succeeded on the same SHA. Release assets are
+    `electric-furnace-0.2.0.jar` + `SHA256SUMS.txt` only — no `original-*.jar` leak —
+    and `sha256sum --check` against the downloaded assets returns
+    `electric-furnace-0.2.0.jar: OK`, confirming the bare-filename manifest fix from
+    `v0.1.1` still holds.
+  - Historical evidence for `0.1.0`/`0.1.1`: run
     [29706471487](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29706471487)
     on `main` (commit `9025cf9`) completed **success** in 25s, 2026-07-19, building
     the full 238-test suite on Temurin 25 in a clean environment. The earlier scaffold
