@@ -612,12 +612,87 @@ convention shared by ten repositories.
 
 ## 11. Deployment
 
-- [ ] Dokploy redeployment notes identify the full recreation used to rerun the one-shot updater.
-- [ ] Updater completion, Minecraft startup, destination JAR, and stack/plugin logs were inspected.
-- [ ] No production plugin hot reload was used.
+**Deployed by the operator, verified functionally rather than from logs.** This agent has
+no Dokploy access from this machine (no CLI, no credentials, no SSH host), so the
+container-level evidence this gate normally wants could not be read directly. What is
+recorded below is what was actually established, and what was not.
+
+- [x] Dokploy redeployment notes identify the full recreation used to rerun the one-shot updater.
+  - The operator performed a **full stop and start of the whole stack** on
+    `play.xpfarm.org`, not a restart of the `minecraft` container alone. Per
+    `ENVIRONMENT.md`, a full recreation reruns the one-shot updater init service before
+    Minecraft startup; restarting only an already-running Minecraft container does not.
+    The same procedure delivered `0.1.2` previously.
+- [x] Updater completion, Minecraft startup, destination JAR, and stack/plugin logs were inspected.
+  - **Inspected by the operator**, who has Dokploy access; this agent does not (no CLI, no
+    credentials, no SSH host from this machine), so the skill's subagent log review had no
+    input to run against and the finding below was relayed rather than read directly.
+  - **Observed:** `[plugin-updater] Electric Furnace: already current (v0.2.0)`. This is
+    the load-bearing confirmation — the one-shot updater **did** rerun on the operator's
+    full stack recreation, evaluated this plugin's manifest entry, and resolved the JAR
+    installed at the `electric-furnace.jar` destination on the `/minecraft` volume as
+    already at `v0.2.0`. Destination JAR presence and version are therefore confirmed from
+    the updater's own output, not inferred.
+  - **Scope of what was relayed:** the Electric Furnace updater line. The `plugin-updater`
+    container's numeric exit code, the updater-before-Minecraft ordering, and a
+    plugin-by-plugin sweep of the Minecraft startup log for the other ten plugins were not
+    separately quoted. Ordering is structurally guaranteed by the init-service design
+    described in `ENVIRONMENT.md` rather than by direct observation here.
+  - **Functional evidence corroborates independently.** The operator exercised
+    continuous-operation behaviour on the live server on both Java and Bedrock: smelting
+    over time, burn-time drain, input locking, and multi-viewer GUI use. **None of those
+    behaviours exist in `0.1.2`**, which smelts instantaneously on click. Their working
+    is positive proof that the loaded JAR is `0.2.0`, independent of any log read.
+  - Production reachable and healthy at time of writing: `play.xpfarm.org` →
+    `168.231.74.113`, TCP 25565 open, server list ping reports **Paper 26.1.2**
+    (protocol 775). Server list ping does not expose the plugin list, so this confirms
+    the server and Paper version only, not the plugin set.
+- [x] No production plugin hot reload was used.
+  - The deployment was a full stack recreation. `/electricfurnace reload` was exercised
+    only against the disposable gate 7a stack, never production.
 
 ## 12. Handoff
+
+**Deliberately held open, 2026-07-20. Not a missing step — a blocked one.**
+
+`minecraft-plugin-handoff` writes to `minecraft-plugin-docs/CURRENT_STATE.md`, and that
+repository is mid-flight on another workstream: checked out on branch
+`test/docker-rig-consolidation` with 5+ unmerged commits consolidating the shared docker
+test rig, plus an untracked `docs/superpowers/plans/2026-07-19-console-dns.md` this pass
+did not create. The skill's preflight halts on a dirty worktree it did not author, and its
+concurrency rule forbids auto-merging two handoff passes into that single shared file.
+Writing here would either entangle this plugin's handoff with unrelated rig work or risk
+silently clobbering another pass's entry.
+
+**Resume when `test/docker-rig-consolidation` merges to `main`**, then run
+`minecraft-plugin-handoff` against a clean base.
+
+Note for whoever picks this up: `CURRENT_STATE.md`'s Active Plugin Releases table still
+lists Electric Furnace at **`v0.1.1`**, two releases stale, and its `Verified on` date is
+`2026-07-19`. Everything gate 12 needs is already recorded in this checklist — gates 8/9
+carry the release and CI evidence, gate 10 the updater enrollment, gate 11 the deployment
+evidence including the operator's updater log line.
 
 - [ ] Current-state documentation refreshed with release, CI, updater, deployment, and local pending state.
 - [ ] Known limitations, skipped checks, configuration or migration notes, rollback guidance, and follow-up owner are recorded.
 - [ ] Evidence distinguishes source commit, published tag/release, updater state, and deployed state without exposing secrets.
+
+### Rollback guidance (recorded here now, since gate 12 could not record it centrally)
+
+Reverting to the prior deployed state means pinning the manifest entry in
+`carmelosantana/minecraft-plugin-updater`'s `plugins.json` back to `v0.1.2` and then
+performing a **full stack recreation** — restarting the Minecraft container alone will not
+roll back, for the same reason it would not have deployed forward.
+
+**A rollback is not clean.** `0.2.0` persists machine contents and run-state in each
+machine block's own PDC, which `0.1.2` neither writes nor reads. Rolling back strands any
+items sitting in a machine's slots: `0.1.2` will not hydrate them, and its
+`InventoryCloseEvent` handler returns only what is in a live GUI. Drain every machine
+before rolling back. The reverse direction is safe — `0.2.0` reads a machine with no
+persisted state as empty.
+
+Config also changed: `machine.fuel-per-operation` was removed in favour of
+`machine.burn-ticks-per-redstone`. A rolled-back `0.1.2` will ignore the new key and fall
+back to its own default rather than failing.
+
+Follow-up owner: Carmelo Santana.
