@@ -228,6 +228,52 @@ class GearStatsDeriverTest {
         assertEquals(STEEL.armor(), sum);
     }
 
+    // ---- Display space -> modifier space --------------------------------------------
+
+    @Test
+    void attackDamageModifier_vanillaReferenceDamages_convertToVanillasOwnModifiers() {
+        // The check that proves PLAYER_BASE_ATTACK_DAMAGE is right rather than merely
+        // self-consistent: vanilla's iron/diamond/netherite swords *display* 6/7/8 and
+        // carry modifiers of exactly +5/+6/+7. The reference constants are the displayed
+        // numbers, so converting them must reproduce vanilla's modifiers.
+        assertEquals(5.0, GearStatsDeriver.attackDamageModifier(AlloyRegistry.IRON_ATTACK_DAMAGE), 1e-9);
+        assertEquals(6.0, GearStatsDeriver.attackDamageModifier(AlloyRegistry.DIAMOND_ATTACK_DAMAGE), 1e-9);
+        assertEquals(7.0, GearStatsDeriver.attackDamageModifier(AlloyRegistry.NETHERITE_ATTACK_DAMAGE), 1e-9);
+    }
+
+    @Test
+    void attackDamageModifier_steelSword_writesTheDisplayedValueMinusThePlayerBase() {
+        // Steel is configured for a displayed 6.5, so the modifier written must be 5.5 --
+        // writing 6.5 would display 7.5, half a point above vanilla diamond.
+        double displayed = GearStatsDeriver.derive(STEEL, GearPiece.SWORD).attackDamage();
+
+        assertEquals(6.5, displayed, 1e-9);
+        assertEquals(5.5, GearStatsDeriver.attackDamageModifier(displayed), 1e-9);
+    }
+
+    @Test
+    void attackDamageModifier_steelAxe_convertsTheDerivedAxeDamageToo() {
+        double displayed = GearStatsDeriver.derive(STEEL, GearPiece.AXE).attackDamage();
+
+        assertEquals(8.5, displayed, 1e-9);
+        assertEquals(7.5, GearStatsDeriver.attackDamageModifier(displayed), 1e-9);
+    }
+
+    @Test
+    void attackDamageModifier_atTheBalanceCeiling_displaysNoHigherThanNetherite() {
+        // The ceiling only binds if the modifier is display-minus-base: writing the
+        // configured 8.0 straight through would display 9.0, above netherite.
+        double modifier = GearStatsDeriver.attackDamageModifier(AlloyRegistry.NETHERITE_ATTACK_DAMAGE);
+
+        assertEquals(AlloyRegistry.NETHERITE_ATTACK_DAMAGE,
+                modifier + GearStatsDeriver.PLAYER_BASE_ATTACK_DAMAGE, 1e-9);
+    }
+
+    @Test
+    void playerBaseAttackDamage_isVanillasOwnBase() {
+        assertEquals(1.0, GearStatsDeriver.PLAYER_BASE_ATTACK_DAMAGE);
+    }
+
     @Test
     void derive_axeDamageMayExceedTheNetheriteSwordReference() {
         // Electrum Steel: 6.8 + 2.0 = 8.8, above NETHERITE_ATTACK_DAMAGE (8.0).

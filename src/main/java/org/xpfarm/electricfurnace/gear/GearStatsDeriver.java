@@ -38,7 +38,49 @@ public final class GearStatsDeriver {
     /** Vanilla netherite armor's durability base unit; the ceiling for any derived value. */
     public static final int NETHERITE_ARMOR_BASE = 37;
 
+    /**
+     * The player's own base {@code ATTACK_DAMAGE} attribute value, which every held
+     * weapon's modifier is added on top of.
+     *
+     * <p>This exists because attack damage is the one stat here configured in
+     * <b>display space</b> while the item must be written in <b>modifier space</b>.
+     * Vanilla's swords <em>display</em> 6/7/8 for iron/diamond/netherite but carry
+     * modifiers of +5/+6/+7 -- the displayed number is base-plus-modifier, and the base
+     * is this 1.0. The alloy reference constants ({@code AlloyRegistry.IRON_ATTACK_DAMAGE}
+     * and friends) are those displayed numbers, so an alloy's configured
+     * {@code attack-damage} is a displayed total too.
+     *
+     * <p>The subtraction cannot be skipped, because writing an item's
+     * {@code attribute_modifiers} <b>replaces</b> the item type's vanilla defaults rather
+     * than merging with them. Writing the displayed value straight through would stack it
+     * on the player's base a second time and inflate every weapon by exactly 1.0 -- which
+     * would also let a configured 8.0 display as 9.0 and slip past the balance ceiling
+     * that {@code AlloyRegistry.clampStats} exists to enforce.
+     *
+     * <p>No sibling constant exists for the other three stats, and none should: the
+     * player's base {@code ATTACK_SPEED} is 4.0 but {@code attack-speed} is already
+     * configured in modifier space (-2.6 displays as 1.4), and the base for both
+     * {@code ARMOR} and {@code ARMOR_TOUGHNESS} is 0, so display and modifier space
+     * coincide there.
+     */
+    public static final double PLAYER_BASE_ATTACK_DAMAGE = 1.0;
+
     private GearStatsDeriver() {
+    }
+
+    /**
+     * Converts a display-space attack damage -- what {@link GearStats#attackDamage()}
+     * carries, and what a tooltip should read -- into the modifier-space value to write
+     * as an {@code ADD_NUMBER ATTACK_DAMAGE} modifier.
+     *
+     * <p>See {@link #PLAYER_BASE_ATTACK_DAMAGE} for why the two spaces differ. This is
+     * the <em>only</em> stat needing the conversion; call it for nothing else.
+     *
+     * @param displayAttackDamage the player-meaningful damage the tooltip should show
+     * @return the modifier amount to write on the item
+     */
+    public static double attackDamageModifier(double displayAttackDamage) {
+        return displayAttackDamage - PLAYER_BASE_ATTACK_DAMAGE;
     }
 
     /**

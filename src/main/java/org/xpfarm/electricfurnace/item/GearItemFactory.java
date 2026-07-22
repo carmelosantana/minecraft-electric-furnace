@@ -126,11 +126,19 @@ public final class GearItemFactory {
      * <p>Note {@code Attribute} is an interface on this Paper version, not an enum --
      * {@code EnumMap}, {@code Attribute.values()}, and {@code GENERIC_*} constants all
      * fail here.
+     *
+     * <p><b>Attack damage alone is converted out of display space</b> via
+     * {@link GearStatsDeriver#attackDamageModifier(double)}: because the write replaces
+     * rather than merges, the modifier must be the tooltip value minus the player's base
+     * damage. The other three stats are written unconverted -- {@code attack-speed} is
+     * configured in modifier space already, and the player's base {@code ARMOR} and
+     * {@code ARMOR_TOUGHNESS} are both 0.
      */
     private static void applyAttributes(ItemMeta meta, GearPiece piece, GearStats stats) {
         if (piece.kind() == GearPiece.Kind.WEAPON) {
             addModifier(meta, Attribute.ATTACK_DAMAGE, piece.id() + "_attack_damage",
-                    stats.attackDamage(), EquipmentSlotGroup.MAINHAND);
+                    GearStatsDeriver.attackDamageModifier(stats.attackDamage()),
+                    EquipmentSlotGroup.MAINHAND);
             addModifier(meta, Attribute.ATTACK_SPEED, piece.id() + "_attack_speed",
                     stats.attackSpeed(), EquipmentSlotGroup.MAINHAND);
             return;
