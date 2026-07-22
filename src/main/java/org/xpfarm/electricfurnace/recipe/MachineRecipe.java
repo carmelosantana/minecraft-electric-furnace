@@ -48,7 +48,14 @@ public final class MachineRecipe implements Listener {
     /** The recipe's stable key. */
     public static final NamespacedKey KEY = new NamespacedKey("electricfurnace", "electric_furnace");
 
-    private static final String CRAFT_PERMISSION = "electricfurnace.craft";
+    /**
+     * The permission node gating every craft this plugin registers.
+     *
+     * <p>Public and shared with {@link GearRecipes} deliberately: two handlers enforcing
+     * the same node from two copies of the same string literal is one typo away from an
+     * operator revoking the node and finding half the recipes still work.
+     */
+    public static final String CRAFT_PERMISSION = "electricfurnace.craft";
 
     /** Builds the shaped recipe. Pure construction -- registers nothing. */
     public static ShapedRecipe build() {

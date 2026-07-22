@@ -371,7 +371,7 @@ class GearStatsDeriverTest {
     }
 
     @Test
-    void splitArmor_spareePointsFavourChestplateOverBoots() {
+    void splitArmor_sparePointsFavourChestplateOverBoots() {
         // Total 1: every piece floors to 0, one spare point, chestplate wins the tiebreak.
         Map<GearPiece, Integer> split = GearStatsDeriver.splitArmor(1);
 
@@ -1106,7 +1106,7 @@ Append to `AlloyRegistryTest`:
 
 Add `import org.xpfarm.electricfurnace.gear.GearBase;` to the test's import block.
 
-These three tests go through the `baseOf` helper above because `AlloyRegistry` exposes only `all()` — verified, it has no by-id lookup. Do not add one just for the tests.
+**Correction (found during execution): the premise behind `baseOf` was wrong.** `AlloyRegistry.get(String id)` returning `Optional<AlloyDefinition>` already exists and is already used by pre-existing tests. The plan's earlier claim that only `all()` was available came from a grep that searched for the wrong method name. Use `registry.get(id).orElseThrow().base()` directly and do not add the `baseOf` helper.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1222,7 +1222,7 @@ git commit -m "feat(gear): add xpfarm:gear_piece to the shared PDC contract"
 
 Today a player recycling a four-piece alloy set is told `"non-metal input"`, which is not merely unhelpful but wrong — the inputs are neither non-metal nor unrecognized. Rule 2 must stay ahead of the slot-count rule, since remelt is still the one path accepting fewer than `slots` items.
 
-**This task changes an existing test's expectations.** `RecycleResolverTest` has a case asserting that multiple alloy items reject as `"non-metal input"`; update it to the new behaviour rather than deleting it. Find it with:
+**Correction (found during execution): this premise was wrong.** `RecycleResolverTest` has **no** case asserting that multiple alloy items reject as `"non-metal input"`. The closest test, `rule4_alloyItemAmongOthers_isTreatedAsNonMetalInput`, uses four iron plus *one* alloy — not all-alloy, so its assertion stays correct and must **not** be changed to expect `"mixed alloys"`. Doing so would introduce a bug. Rename it and refresh its now-stale comment instead. Locate it with:
 
 ```bash
 grep -n "non-metal input" src/test/java/org/xpfarm/electricfurnace/recycle/RecycleResolverTest.java

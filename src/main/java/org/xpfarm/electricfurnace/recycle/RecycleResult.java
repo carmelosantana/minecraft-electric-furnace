@@ -54,7 +54,7 @@ public sealed interface RecycleResult
         }
     }
 
-    /** A single alloy item was remelted. Yields {@code amount} ingots of {@code alloyId}. */
+    /** An all-alloy input was remelted. Yields {@code amount} ingots of {@code alloyId}. */
     record Remelt(String alloyId, int amount) implements RecycleResult {
         @Override
         public Kind kind() {

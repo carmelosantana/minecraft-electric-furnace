@@ -57,8 +57,9 @@ recycling:
   # Alloy ingots yielded for a mixed-metal input -- whether it matches a named
   # recipe below or falls back to the generic Fused Alloy. Valid range: 0-64.
   yield-mixed-alloy: 2
-  # Ingots yielded when remelting a single alloy item. This is the only recipe
-  # that accepts fewer than `slots` items. Valid range: 0-64.
+  # Ingots yielded per alloy item remelted -- an all-alloy input of N items sharing
+  # one alloy id yields N times this. This is the only recipe that accepts fewer
+  # than `slots` items. Valid range: 0-64.
   yield-remelt-alloy: 1
   # Whether damaged (partially worn) gear is accepted at full yield. Durability is
   # never scaled into the yield -- giving worn-out gear a worthwhile destination
@@ -77,10 +78,33 @@ recycling:
 # stat may exceed the netherite reference; out-of-range stats are clamped to the
 # diamond reference and logged. This clamp runs unconditionally in code -- there
 # is no switch here to disable it.
+#
+# `base` selects the vanilla material family this alloy's gear is built on: one of
+# copper, iron, gold, diamond, netherite. It is the only thing that makes two alloys'
+# gear look different -- there is no resource pack, so texture comes from the base
+# item. Each family is one of the five vanilla tiers that has both weapon and armor
+# forms. Omit it to accept the thematic default. An unrecognized value warns and falls
+# back to that default.
+#
+# The netherite base normally grants fire immunity and knockback resistance. This
+# plugin strips both from minted gear -- a netherite-based alloy gets neither.
+#
+# The gold base makes piglins neutral toward the wearer, and that one cannot be turned
+# off. It rides on the `#minecraft:piglin_safe_armor` item tag rather than a per-item
+# component, so no lever exists to remove it. The shipped rose_gold alloy uses this
+# base, so Rose Gold gear permanently pacifies piglins toward whoever wears it. If you
+# do not want that, give that alloy a different `base`.
+#
+# The copper base needs Minecraft 1.21.9 or newer -- vanilla copper equipment does not
+# exist before that. That version floor is the whole plugin's, not this key's: the
+# recycler's metal table names copper equipment directly, so on an older server it fails
+# to load and nothing recycles at all. Run 1.21.9 or newer. The shipped ferrocopper
+# alloy uses this base.
 alloys:
   steel:
     display-name: "Steel"
     color: "#71797E"
+    base: iron
     lore:
       - "A carbon-hardened iron alloy."
       - "Stronger than iron, cheaper than netherite."
@@ -95,6 +119,7 @@ alloys:
   rose_gold:
     display-name: "Rose Gold"
     color: "#B76E79"
+    base: gold
     lore:
       - "A warm copper-gold blend."
     inputs: [copper, gold]
@@ -108,6 +133,7 @@ alloys:
   ferrocopper:
     display-name: "Ferrocopper"
     color: "#B87333"
+    base: copper
     lore:
       - "Copper toughened with iron."
     inputs: [copper, iron]
@@ -121,6 +147,7 @@ alloys:
   electrum_steel:
     display-name: "Electrum Steel"
     color: "#D4C9A8"
+    base: diamond
     lore:
       - "Gold-veined structural steel."
     inputs: [gold, iron]
@@ -134,6 +161,7 @@ alloys:
   fused_alloy:
     display-name: "Fused Alloy"
     color: "#4B4B4B"
+    base: netherite
     lore:
       - "An unrefined fusion of leftover metals."
     # Fallback: matches any mixed-metal combination not covered by a named recipe

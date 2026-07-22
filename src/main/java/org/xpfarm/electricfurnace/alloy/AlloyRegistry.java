@@ -10,6 +10,7 @@
 package org.xpfarm.electricfurnace.alloy;
 
 import org.bukkit.configuration.ConfigurationSection;
+import org.xpfarm.electricfurnace.gear.GearBase;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -28,8 +29,11 @@ import java.util.function.Consumer;
  * <p>The balance ceiling is a binding, code-enforced constraint -- not merely
  * documented -- and is applied unconditionally by {@link #fromDefinitions}: there is
  * deliberately no configuration switch to disable it. Any stat exceeding the
- * netherite reference is clamped down to the diamond reference and a warning is
- * logged naming the alloy, the stat, the configured value, and the clamp.
+ * netherite reference is clamped down to the diamond reference, and max durability
+ * and enchantability are additionally floored at 1 because both back
+ * positive-int-coded item data components. Every adjustment logs a warning naming the
+ * alloy, the stat, the configured value, and the replacement. See
+ * {@link #clampStats} for the per-stat detail.
  *
  * <p>{@link #fromDefinitions} is the pure, Bukkit-free core: it takes already-parsed
  * {@link AlloyDefinition}s and is what {@code AlloyRegistryTest} exercises directly,
@@ -58,6 +62,9 @@ public final class AlloyRegistry {
     /** id of the synthesized fallback used if no configured recipe declares empty inputs. */
     private static final String SYNTHESIZED_FALLBACK_ID = "fused_alloy";
 
+    /** The lowest value a positive-int-coded stat may take before its data component rejects it. */
+    private static final int POSITIVE_STAT_MINIMUM = 1;
+
     private final Map<String, AlloyDefinition> byId;
     private final String fallbackId;
 
@@ -82,7 +89,7 @@ public final class AlloyRegistry {
         for (AlloyDefinition def : rawDefinitions) {
             AlloyDefinition safe = new AlloyDefinition(
                     def.id(), def.displayName(), def.lore(), def.color(), def.inputIds(),
-                    clampStats(def.id(), def.stats(), warn));
+                    clampStats(def.id(), def.stats(), warn), def.base());
             clamped.put(safe.id(), safe);
             if (safe.isFallback() && fallbackId == null) {
                 fallbackId = safe.id();
@@ -95,7 +102,8 @@ public final class AlloyRegistry {
             AlloyDefinition synthesized = new AlloyDefinition(
                     SYNTHESIZED_FALLBACK_ID, "Fused Alloy", List.of(), "#4B4B4B", Set.of(),
                     new AlloyStats(IRON_ATTACK_DAMAGE, -2.6, IRON_ARMOR, IRON_ARMOR_TOUGHNESS,
-                            IRON_MAX_DURABILITY, 10));
+                            IRON_MAX_DURABILITY, 10),
+                    GearBase.defaultFor(SYNTHESIZED_FALLBACK_ID));
             clamped.put(synthesized.id(), synthesized);
             fallbackId = synthesized.id();
         }
@@ -107,8 +115,9 @@ public final class AlloyRegistry {
      * Parses the {@code alloys:} section of {@code config.yml} and delegates to
      * {@link #fromDefinitions}. Each child section is read as one alloy: {@code
      * display-name} (string), {@code lore} (string list, optional), {@code color}
-     * (string, optional), {@code inputs} (string list, may be empty to mark the
-     * fallback), and {@code stats.*} (the six {@link AlloyStats} fields).
+     * (string, optional), {@code base} (a {@link GearBase} token, optional -- defaults
+     * to {@link GearBase#defaultFor(String)}), {@code inputs} (string list, may be empty
+     * to mark the fallback), and {@code stats.*} (the six {@link AlloyStats} fields).
      *
      * <p>A missing or malformed alloy entry is skipped with a warning naming the
      * offending alloy id, rather than thrown out of the whole method -- consistent
@@ -130,7 +139,7 @@ public final class AlloyRegistry {
                     continue;
                 }
                 try {
-                    definitions.add(parseDefinition(id, section));
+                    definitions.add(parseDefinition(id, section, warn));
                 } catch (RuntimeException e) {
                     // A single malformed entry (e.g. a stats value the section
                     // implementation refuses to coerce) must cost only this alloy, not
@@ -144,11 +153,12 @@ public final class AlloyRegistry {
         return fromDefinitions(definitions, warn);
     }
 
-    private static AlloyDefinition parseDefinition(String id, ConfigurationSection section) {
+    private static AlloyDefinition parseDefinition(String id, ConfigurationSection section, Consumer<String> warn) {
         String displayName = section.getString("display-name", id);
         List<String> lore = section.getStringList("lore");
         String color = section.getString("color", "#FFFFFF");
         Set<String> inputIds = Set.copyOf(section.getStringList("inputs"));
+        GearBase base = parseBase(id, section.getString("base"), warn);
 
         ConfigurationSection statsSection = section.getConfigurationSection("stats");
         AlloyStats stats = new AlloyStats(
@@ -160,7 +170,27 @@ public final class AlloyRegistry {
                 statsSection == null ? 10 : statsSection.getInt("enchantability", 10)
         );
 
-        return new AlloyDefinition(id, displayName, lore, color, inputIds, stats);
+        return new AlloyDefinition(id, displayName, lore, color, inputIds, stats, base);
+    }
+
+    /**
+     * Resolves {@code alloys.<id>.base} to a {@link GearBase}. An absent key takes the
+     * alloy's thematic default; an unrecognized one warns and takes that same default.
+     * A bad base never disables the alloy -- consistent with this plugin's config
+     * contract that no configuration mistake stops the plugin from starting.
+     */
+    private static GearBase parseBase(String id, String rawBase, Consumer<String> warn) {
+        if (rawBase == null) {
+            return GearBase.defaultFor(id);
+        }
+        Optional<GearBase> parsed = GearBase.byId(rawBase);
+        if (parsed.isPresent()) {
+            return parsed.get();
+        }
+        GearBase fallback = GearBase.defaultFor(id);
+        warn.accept("ElectricFurnace alloys: alloy '" + id + "' has an unrecognized base '" + rawBase
+                + "'; falling back to '" + fallback.id() + "'.");
+        return fallback;
     }
 
     /** Looks up a definition by id. */
@@ -194,9 +224,18 @@ public final class AlloyRegistry {
      * Clamps a stat block against the balance ceiling: any of attack damage, armor,
      * armor toughness, or max durability that exceeds the netherite reference is
      * replaced with the diamond reference, and a warning naming the alloy, the stat,
-     * the configured value, and the clamp is sent to {@code warn}. Attack speed and
-     * enchantability have no defined ceiling reference and are passed through
-     * unchanged.
+     * the configured value, and the clamp is sent to {@code warn}. Attack speed has no
+     * defined ceiling reference and is passed through unchanged.
+     *
+     * <p>Max durability and enchantability are additionally <b>floored at 1</b>. Both
+     * back positive-int-coded data components -- {@code Damageable#setMaxDamage} and
+     * {@code ItemMeta#setEnchantable} -- so a configured {@code 0} or negative would
+     * throw {@code IllegalArgumentException} out of gear creation at mint time, during a
+     * command, a craft, or recipe registration, from a config the loader accepted
+     * silently. Warning and degrading here keeps this plugin's standing contract that no
+     * configuration mistake stops the plugin or throws at runtime. Armor needs no floor
+     * ({@code GearStatsDeriver.splitArmor} already treats a negative total as 0) and a
+     * negative attack damage is harmless.
      */
     static AlloyStats clampStats(String alloyId, AlloyStats stats, Consumer<String> warn) {
         double attackDamage = clampToCeiling(alloyId, "attack-damage", stats.attackDamage(),
@@ -205,11 +244,14 @@ public final class AlloyRegistry {
                 NETHERITE_ARMOR, DIAMOND_ARMOR, warn);
         double armorToughness = clampToCeiling(alloyId, "armor-toughness", stats.armorToughness(),
                 NETHERITE_ARMOR_TOUGHNESS, DIAMOND_ARMOR_TOUGHNESS, warn);
-        int maxDurability = (int) clampToCeiling(alloyId, "max-durability", stats.maxDurability(),
-                NETHERITE_MAX_DURABILITY, DIAMOND_MAX_DURABILITY, warn);
+        int maxDurability = floorAtOne(alloyId, "max-durability",
+                (int) clampToCeiling(alloyId, "max-durability", stats.maxDurability(),
+                        NETHERITE_MAX_DURABILITY, DIAMOND_MAX_DURABILITY, warn),
+                warn);
+        int enchantability = floorAtOne(alloyId, "enchantability", stats.enchantability(), warn);
 
         return new AlloyStats(attackDamage, stats.attackSpeed(), armor, armorToughness,
-                maxDurability, stats.enchantability());
+                maxDurability, enchantability);
     }
 
     private static double clampToCeiling(String alloyId, String statName, double value,
@@ -220,6 +262,16 @@ public final class AlloyRegistry {
                     + "' value '" + value + "' exceeds the netherite reference '" + netheriteReference
                     + "'; clamped to the diamond reference '" + diamondReference + "'.");
             return diamondReference;
+        }
+        return value;
+    }
+
+    private static int floorAtOne(String alloyId, String statName, int value, Consumer<String> warn) {
+        if (value < POSITIVE_STAT_MINIMUM) {
+            warn.accept("ElectricFurnace alloys: alloy '" + alloyId + "' stat '" + statName
+                    + "' value '" + value + "' must be positive; raised to the minimum '"
+                    + POSITIVE_STAT_MINIMUM + "'.");
+            return POSITIVE_STAT_MINIMUM;
         }
         return value;
     }

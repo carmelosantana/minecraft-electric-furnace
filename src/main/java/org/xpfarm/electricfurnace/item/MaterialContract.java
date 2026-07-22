@@ -43,6 +43,9 @@ public final class MaterialContract {
     /** STRING: the specific material id within the owning system, e.g. {@code "steel"}. */
     public static final NamespacedKey MATERIAL_ID = new NamespacedKey("xpfarm", "material_id");
 
+    /** STRING: the gear piece id for a minted gear item, e.g. {@code "chestplate"}. */
+    public static final NamespacedKey GEAR_PIECE = new NamespacedKey("xpfarm", "gear_piece");
+
     /** BYTE: marks an item as the Electric Furnace machine item. */
     public static final NamespacedKey MACHINE = new NamespacedKey("electricfurnace", "machine");
 
@@ -75,6 +78,11 @@ public final class MaterialContract {
     /** Reads {@link #MATERIAL_ID} off {@code stack}, if present. */
     public static Optional<String> readMaterialId(ItemStack stack) {
         return readString(stack, MATERIAL_ID);
+    }
+
+    /** Reads {@link #GEAR_PIECE} off {@code stack}, if present. */
+    public static Optional<String> readGearPiece(ItemStack stack) {
+        return readString(stack, GEAR_PIECE);
     }
 
     /** Whether {@code stack} carries the {@link #MACHINE} marker. */

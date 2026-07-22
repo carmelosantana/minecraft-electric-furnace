@@ -9,6 +9,8 @@
  */
 package org.xpfarm.electricfurnace.alloy;
 
+import org.xpfarm.electricfurnace.gear.GearBase;
+
 import java.util.List;
 import java.util.Set;
 
@@ -34,6 +36,7 @@ import java.util.Set;
  * @param color       hex color string used to distinguish this alloy visually
  * @param inputIds    distinct required input ids; empty marks the generic fallback
  * @param stats       the stat block, balance-ceiling-clamped by {@link AlloyRegistry}
+ * @param base        the vanilla base material family this alloy's gear is built on
  */
 public record AlloyDefinition(
         String id,
@@ -41,7 +44,8 @@ public record AlloyDefinition(
         List<String> lore,
         String color,
         Set<String> inputIds,
-        AlloyStats stats
+        AlloyStats stats,
+        GearBase base
 ) {
     public AlloyDefinition {
         lore = List.copyOf(lore);

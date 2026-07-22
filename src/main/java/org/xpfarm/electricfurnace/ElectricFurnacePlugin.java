@@ -22,6 +22,7 @@ import org.xpfarm.electricfurnace.listener.RedstoneListener;
 import org.xpfarm.electricfurnace.machine.MachineRegistry;
 import org.xpfarm.electricfurnace.machine.MachineStore;
 import org.xpfarm.electricfurnace.machine.MachineTicker;
+import org.xpfarm.electricfurnace.recipe.GearRecipes;
 import org.xpfarm.electricfurnace.recipe.MachineRecipe;
 
 import java.util.List;
@@ -48,6 +49,13 @@ import java.util.List;
  * the values directly would have pinned each collaborator to the config it was
  * constructed with, and a reload would silently do nothing to them.
  *
+ * <p>{@link GearRecipes} is the one collaborator a supplier cannot keep current, and so
+ * the one {@link #reload()} has to rebuild by hand: its ingredients are
+ * {@code ExactChoice}, which snapshots the ingot stack when the recipe is registered and
+ * then matches it whole. A recipe carried over from the previous config would not fail
+ * loudly after an ingot's name, lore, or colour changed -- it would simply stop matching
+ * anything, with no error and no log line.
+ *
  * <h2>Shutdown never loses items</h2>
  *
  * <p>{@link #onDisable} stops {@link MachineTicker} <em>first</em>, then calls
@@ -71,6 +79,10 @@ import java.util.List;
  * from any one of them would abort {@code onDisable} before the steps after it ever
  * ran, and for the ticker in particular, which runs first, that would mean losing
  * every live machine's state before {@code flushAll} got a chance to persist it.
+ *
+ * <p>Recipe teardown ({@code MachineRecipe.unregister()}, {@link GearRecipes#unregister()})
+ * comes after all of that on purpose: it is bookkeeping, not item safety, and nothing
+ * that is not item safety belongs in front of the three steps above.
  */
 public final class ElectricFurnacePlugin extends JavaPlugin {
 
@@ -80,6 +92,7 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
     private MachineStore store;
     private MachineEffects effects;
     private MachineTicker ticker;
+    private GearRecipes gearRecipes;
 
     @Override
     public void onEnable() {
@@ -156,6 +169,21 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(new MachineRecipe(), this);
         });
 
+        step("gear recipes", () -> {
+            gearRecipes = new GearRecipes(this::alloys, this::warn);
+            // Listener first, recipes second. If registerEvents ever failed, registering
+            // in the other order would leave 30 craftable recipes live with the
+            // onPrepareCraft Bedrock backstop absent -- which is exactly the
+            // item-duplication path that handler exists to close.
+            getServer().getPluginManager().registerEvents(gearRecipes, this);
+            gearRecipes.register();
+            // Players can already be online here: /reload confirm disables and
+            // re-enables the plugin underneath them, and PlayerJoinEvent will not fire
+            // again for anyone who never left. On a cold start this is a no-op over an
+            // empty player list.
+            gearRecipes.refreshOnlinePlayers();
+        });
+
         getLogger().info("ElectricFurnace enabled (" + alloys.all().size() + " alloys, effects "
                 + (effects != null && effects.isRunning() ? "on" : "off") + ", ticker "
                 + (ticker != null && ticker.isRunning() ? "on" : "off") + ").");
@@ -209,6 +237,15 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
             effects.stop();
         }
         MachineRecipe.unregister();
+        // Recipe teardown runs LAST, beside MachineRecipe's, and deliberately not ahead
+        // of the three steps above: it is bookkeeping, not item safety, and nothing that
+        // is not item safety belongs in front of ticker.stop()/flushAll()/closeAll().
+        // Called directly rather than left to an event for the same reason the steps
+        // above are -- Bukkit clears isEnabled before onDisable and skips dispatch to a
+        // disabled plugin, so no listener of ours fires from here.
+        if (gearRecipes != null) {
+            gearRecipes.unregister();
+        }
     }
 
     /**
@@ -227,6 +264,21 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
             effects.restart();
         }
         MachineRecipe.register();
+        // Guarded like an enable step, and last: the config itself has already been
+        // swapped in by this point, so a failure here must degrade the gear recipes
+        // alone rather than propagate out of reload() and report the whole reload as
+        // failed when everything else did apply.
+        step("gear recipes", () -> {
+            if (gearRecipes != null) {
+                // Rebuild against the new registry. ExactChoice ingredients are snapshotted
+                // at registration, so recipes built from the previous config would silently
+                // stop matching once an ingot's name, lore, or colour changed.
+                gearRecipes.register();
+                // register() alone would leave every player currently on the server with
+                // the recipe book and the cached recipe data they had before the reload.
+                gearRecipes.refreshOnlinePlayers();
+            }
+        });
     }
 
     private void loadConfiguration() {
