@@ -61,6 +61,20 @@ class GearStatsDeriverTest {
     }
 
     @Test
+    void splitArmor_sparePointsGoByRemainderSizeNotByPieceOrder() {
+        // Total 17 floors to 6/5/2/2 = 15, leaving two spare points. Remainders are
+        // chest 16, helmet 11, boots 11, leggings 2 -- so the helmet, the *smallest*
+        // share, outranks the leggings for the second spare point. Handing spares out
+        // in plain armorPieces() order would give leggings 6 and helmet 2 instead.
+        Map<GearPiece, Integer> split = GearStatsDeriver.splitArmor(17);
+
+        assertEquals(7, split.get(GearPiece.CHESTPLATE));
+        assertEquals(5, split.get(GearPiece.LEGGINGS));
+        assertEquals(3, split.get(GearPiece.HELMET));
+        assertEquals(2, split.get(GearPiece.BOOTS));
+    }
+
+    @Test
     void splitArmor_isDeterministicAcrossRepeatedCalls() {
         for (int i = 0; i < 50; i++) {
             assertEquals(GearStatsDeriver.splitArmor(17), GearStatsDeriver.splitArmor(17));
