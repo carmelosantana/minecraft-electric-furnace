@@ -145,6 +145,109 @@ class AlloyRegistryTest {
         assertEquals(3, warnings.size(), "attack-damage, armor-toughness, and max-durability should each warn once");
     }
 
+    // ---- Positive-int floor: enchantability and max-durability ----------------------
+
+    @Test
+    void zeroEnchantability_isRaisedToOneAndWarns() {
+        // Both stats back positive-int-coded data components (setEnchantable,
+        // setMaxDamage), so a non-positive value throws IllegalArgumentException out of
+        // item creation -- at mint time, from a config the loader accepted silently.
+        // The standing contract is warn-and-degrade, never throw.
+        AlloyStats zeroEnchantability = new AlloyStats(6.5, -2.6, 16, 1.0, 700, 0);
+        AlloyDefinition dull = new AlloyDefinition("dull", "Dull Alloy", List.of(), "#000000",
+                Set.of("iron", "gold"), zeroEnchantability, GearBase.IRON);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(dull, fallback()), this::warn);
+
+        assertEquals(1, registry.get("dull").orElseThrow().stats().enchantability());
+        assertEquals(1, warnings.size());
+        assertTrue(warnings.get(0).contains("dull"), "warning should name the alloy");
+        assertTrue(warnings.get(0).contains("enchantability"), "warning should name the stat");
+        assertTrue(warnings.get(0).contains("'0'"), "warning should name the offending value");
+        assertTrue(warnings.get(0).contains("'1'"), "warning should name what it was raised to");
+    }
+
+    @Test
+    void negativeEnchantability_isRaisedToOneAndWarns() {
+        AlloyStats negative = new AlloyStats(6.5, -2.6, 16, 1.0, 700, -5);
+        AlloyDefinition dull = new AlloyDefinition("dull", "Dull Alloy", List.of(), "#000000",
+                Set.of("iron", "gold"), negative, GearBase.IRON);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(dull, fallback()), this::warn);
+
+        assertEquals(1, registry.get("dull").orElseThrow().stats().enchantability());
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void zeroMaxDurability_isRaisedToOneAndWarns() {
+        AlloyStats brittle = new AlloyStats(6.5, -2.6, 16, 1.0, 0, 12);
+        AlloyDefinition glass = new AlloyDefinition("glass", "Glass Alloy", List.of(), "#000000",
+                Set.of("iron", "gold"), brittle, GearBase.IRON);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(glass, fallback()), this::warn);
+
+        assertEquals(1, registry.get("glass").orElseThrow().stats().maxDurability());
+        assertEquals(1, warnings.size());
+        assertTrue(warnings.get(0).contains("glass"), "warning should name the alloy");
+        assertTrue(warnings.get(0).contains("max-durability"), "warning should name the stat");
+        assertTrue(warnings.get(0).contains("'0'"), "warning should name the offending value");
+        assertTrue(warnings.get(0).contains("'1'"), "warning should name what it was raised to");
+    }
+
+    @Test
+    void negativeMaxDurability_isRaisedToOneAndWarns() {
+        AlloyStats brittle = new AlloyStats(6.5, -2.6, 16, 1.0, -700, 12);
+        AlloyDefinition glass = new AlloyDefinition("glass", "Glass Alloy", List.of(), "#000000",
+                Set.of("iron", "gold"), brittle, GearBase.IRON);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(glass, fallback()), this::warn);
+
+        assertEquals(1, registry.get("glass").orElseThrow().stats().maxDurability());
+        assertEquals(1, warnings.size());
+    }
+
+    @Test
+    void bothNonPositive_areEachFlooredAndEachWarned() {
+        AlloyStats broken = new AlloyStats(6.5, -2.6, 16, 1.0, 0, 0);
+        AlloyDefinition busted = new AlloyDefinition("busted", "Busted Alloy", List.of(), "#000000",
+                Set.of("iron", "gold"), broken, GearBase.IRON);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(busted, fallback()), this::warn);
+
+        AlloyStats floored = registry.get("busted").orElseThrow().stats();
+        assertEquals(1, floored.maxDurability());
+        assertEquals(1, floored.enchantability());
+        assertEquals(2, warnings.size(), "max-durability and enchantability should each warn once");
+    }
+
+    @Test
+    void enchantabilityAndDurabilityOfOne_passThroughUnwarned() {
+        // 1 is the floor, not below it: the boundary must not warn or be altered.
+        AlloyStats minimal = new AlloyStats(6.5, -2.6, 16, 1.0, 1, 1);
+        AlloyDefinition lean = new AlloyDefinition("lean", "Lean Alloy", List.of(), "#000000",
+                Set.of("iron", "gold"), minimal, GearBase.IRON);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(lean, fallback()), this::warn);
+
+        AlloyStats stats = registry.get("lean").orElseThrow().stats();
+        assertEquals(1, stats.maxDurability());
+        assertEquals(1, stats.enchantability());
+        assertTrue(warnings.isEmpty());
+    }
+
+    @Test
+    void ordinaryEnchantability_isNeverTouchedByTheFloor() {
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(
+                List.of(new AlloyDefinition("steel", "Steel", List.of(), "#71797E",
+                        Set.of("iron", "coal"), BASELINE_STATS, GearBase.IRON), fallback()),
+                this::warn);
+
+        assertEquals(12, registry.get("steel").orElseThrow().stats().enchantability());
+        assertEquals(700, registry.get("steel").orElseThrow().stats().maxDurability());
+        assertTrue(warnings.isEmpty());
+    }
+
     private static AlloyDefinition fallback() {
         return new AlloyDefinition("fused_alloy", "Fused Alloy", List.of(), "#4B4B4B", Set.of(),
                 BASELINE_STATS, GearBase.IRON);

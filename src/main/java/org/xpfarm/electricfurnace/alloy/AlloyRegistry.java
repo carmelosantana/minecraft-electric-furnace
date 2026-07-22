@@ -59,6 +59,9 @@ public final class AlloyRegistry {
     /** id of the synthesized fallback used if no configured recipe declares empty inputs. */
     private static final String SYNTHESIZED_FALLBACK_ID = "fused_alloy";
 
+    /** The lowest value a positive-int-coded stat may take before its data component rejects it. */
+    private static final int POSITIVE_STAT_MINIMUM = 1;
+
     private final Map<String, AlloyDefinition> byId;
     private final String fallbackId;
 
@@ -218,9 +221,18 @@ public final class AlloyRegistry {
      * Clamps a stat block against the balance ceiling: any of attack damage, armor,
      * armor toughness, or max durability that exceeds the netherite reference is
      * replaced with the diamond reference, and a warning naming the alloy, the stat,
-     * the configured value, and the clamp is sent to {@code warn}. Attack speed and
-     * enchantability have no defined ceiling reference and are passed through
-     * unchanged.
+     * the configured value, and the clamp is sent to {@code warn}. Attack speed has no
+     * defined ceiling reference and is passed through unchanged.
+     *
+     * <p>Max durability and enchantability are additionally <b>floored at 1</b>. Both
+     * back positive-int-coded data components -- {@code Damageable#setMaxDamage} and
+     * {@code ItemMeta#setEnchantable} -- so a configured {@code 0} or negative would
+     * throw {@code IllegalArgumentException} out of gear creation at mint time, during a
+     * command, a craft, or recipe registration, from a config the loader accepted
+     * silently. Warning and degrading here keeps this plugin's standing contract that no
+     * configuration mistake stops the plugin or throws at runtime. Armor needs no floor
+     * ({@code GearStatsDeriver.splitArmor} already treats a negative total as 0) and a
+     * negative attack damage is harmless.
      */
     static AlloyStats clampStats(String alloyId, AlloyStats stats, Consumer<String> warn) {
         double attackDamage = clampToCeiling(alloyId, "attack-damage", stats.attackDamage(),
@@ -229,11 +241,14 @@ public final class AlloyRegistry {
                 NETHERITE_ARMOR, DIAMOND_ARMOR, warn);
         double armorToughness = clampToCeiling(alloyId, "armor-toughness", stats.armorToughness(),
                 NETHERITE_ARMOR_TOUGHNESS, DIAMOND_ARMOR_TOUGHNESS, warn);
-        int maxDurability = (int) clampToCeiling(alloyId, "max-durability", stats.maxDurability(),
-                NETHERITE_MAX_DURABILITY, DIAMOND_MAX_DURABILITY, warn);
+        int maxDurability = floorAtOne(alloyId, "max-durability",
+                (int) clampToCeiling(alloyId, "max-durability", stats.maxDurability(),
+                        NETHERITE_MAX_DURABILITY, DIAMOND_MAX_DURABILITY, warn),
+                warn);
+        int enchantability = floorAtOne(alloyId, "enchantability", stats.enchantability(), warn);
 
         return new AlloyStats(attackDamage, stats.attackSpeed(), armor, armorToughness,
-                maxDurability, stats.enchantability());
+                maxDurability, enchantability);
     }
 
     private static double clampToCeiling(String alloyId, String statName, double value,
@@ -244,6 +259,16 @@ public final class AlloyRegistry {
                     + "' value '" + value + "' exceeds the netherite reference '" + netheriteReference
                     + "'; clamped to the diamond reference '" + diamondReference + "'.");
             return diamondReference;
+        }
+        return value;
+    }
+
+    private static int floorAtOne(String alloyId, String statName, int value, Consumer<String> warn) {
+        if (value < POSITIVE_STAT_MINIMUM) {
+            warn.accept("ElectricFurnace alloys: alloy '" + alloyId + "' stat '" + statName
+                    + "' value '" + value + "' must be positive; raised to the minimum '"
+                    + POSITIVE_STAT_MINIMUM + "'.");
+            return POSITIVE_STAT_MINIMUM;
         }
         return value;
     }
