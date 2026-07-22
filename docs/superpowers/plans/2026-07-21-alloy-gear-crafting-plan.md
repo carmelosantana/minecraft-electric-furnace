@@ -371,7 +371,7 @@ class GearStatsDeriverTest {
     }
 
     @Test
-    void splitArmor_spareePointsFavourChestplateOverBoots() {
+    void splitArmor_sparePointsFavourChestplateOverBoots() {
         // Total 1: every piece floors to 0, one spare point, chestplate wins the tiebreak.
         Map<GearPiece, Integer> split = GearStatsDeriver.splitArmor(1);
 
