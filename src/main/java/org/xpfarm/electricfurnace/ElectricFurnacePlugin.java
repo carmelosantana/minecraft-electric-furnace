@@ -171,8 +171,12 @@ public final class ElectricFurnacePlugin extends JavaPlugin {
 
         step("gear recipes", () -> {
             gearRecipes = new GearRecipes(this::alloys, this::warn);
-            gearRecipes.register();
+            // Listener first, recipes second. If registerEvents ever failed, registering
+            // in the other order would leave 30 craftable recipes live with the
+            // onPrepareCraft Bedrock backstop absent -- which is exactly the
+            // item-duplication path that handler exists to close.
             getServer().getPluginManager().registerEvents(gearRecipes, this);
+            gearRecipes.register();
             // Players can already be online here: /reload confirm disables and
             // re-enables the plugin underneath them, and PlayerJoinEvent will not fire
             // again for anyone who never left. On a cold start this is a no-op over an

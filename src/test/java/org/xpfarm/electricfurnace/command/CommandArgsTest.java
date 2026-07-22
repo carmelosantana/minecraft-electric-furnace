@@ -12,8 +12,11 @@ package org.xpfarm.electricfurnace.command;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.xpfarm.electricfurnace.alloy.AlloyDefinition;
+import org.xpfarm.electricfurnace.alloy.AlloyStats;
 import org.xpfarm.electricfurnace.command.ElectricFurnaceCommand.ParseResult;
 import org.xpfarm.electricfurnace.command.ElectricFurnaceCommand.Sub;
+import org.xpfarm.electricfurnace.gear.GearBase;
 import org.xpfarm.electricfurnace.gear.GearPiece;
 
 import java.util.HashSet;
@@ -280,7 +283,10 @@ class CommandArgsTest {
             // Diagnosed as a piece typo, not as a bad number: a word in this slot was
             // plainly meant as a piece, and "'trousers' is not a number" would describe
             // the wrong argument entirely.
-            assertTrue(result.error().toLowerCase(java.util.Locale.ROOT).contains("piece"),
+            // "gear piece", not just "piece": usage() itself contains the literal
+            // "[piece]", so the looser assertion would pass on any error that happens to
+            // append usage() -- including a "not a number" one this test exists to reject.
+            assertTrue(result.error().toLowerCase(java.util.Locale.ROOT).contains("gear piece"),
                     "the error should say what kind of token was wrong: " + result.error());
         }
 
@@ -690,6 +696,80 @@ class CommandArgsTest {
 
             assertTrue(out.contains("200 ticks per dust"), out);
             assertFalse(out.contains("items"), out);
+        }
+    }
+
+    @Nested
+    @DisplayName("alloyInfoLine")
+    class AlloyInfoLine {
+
+        private static final AlloyStats STATS = new AlloyStats(6.5D, -2.6D, 16, 1.0D, 700, 12);
+
+        private static AlloyDefinition definition(String id, String displayName,
+                                                  Set<String> inputs, GearBase base) {
+            return new AlloyDefinition(id, displayName, List.of(), "#71797E", inputs, STATS, base);
+        }
+
+        @Test
+        @DisplayName("names the configured base, not the alloy id's thematic default")
+        void namesTheConfiguredBase() {
+            // The whole point of the base being configurable: an operator who set
+            // `steel: base: diamond` must see diamond here, not the iron default that
+            // GearBase.defaultFor("steel") would hand back.
+            String line = ElectricFurnaceCommand.alloyInfoLine(
+                    definition("steel", "Steel", Set.of("iron", "coal"), GearBase.DIAMOND));
+
+            assertTrue(line.contains("diamond base"), line);
+            assertFalse(line.contains("iron base"), line);
+        }
+
+        @Test
+        @DisplayName("the base is reported for every base, using the config token")
+        void everyBaseIsReportedByItsConfigToken() {
+            // The token must be the one an operator writes in config.yml -- gold, not
+            // GOLD or GOLDEN (the material prefix), or the listing cannot be copied back
+            // into `alloys.<id>.base`.
+            for (GearBase base : GearBase.values()) {
+                String line = ElectricFurnaceCommand.alloyInfoLine(
+                        definition("steel", "Steel", Set.of("iron"), base));
+                assertTrue(line.contains(base.id() + " base"),
+                        "base " + base + " should render as its config token: " + line);
+            }
+        }
+
+        @Test
+        @DisplayName("the base does not appear as one of the recipe's inputs")
+        void baseIsNotRenderedAsAnInput() {
+            // The base sits before the arrow, the inputs after it. If it drifted to the
+            // right of `<-` an operator would read it as a required ingredient.
+            String line = ElectricFurnaceCommand.alloyInfoLine(
+                    definition("rose_gold", "Rose Gold", Set.of("copper", "gold"), GearBase.NETHERITE));
+
+            String afterArrow = line.substring(line.indexOf("<-"));
+            assertFalse(afterArrow.contains("netherite"), afterArrow);
+            assertTrue(afterArrow.contains("copper + gold"), afterArrow);
+        }
+
+        @Test
+        @DisplayName("still reports the id, display name, and sorted inputs")
+        void reportsIdDisplayNameAndSortedInputs() {
+            String line = ElectricFurnaceCommand.alloyInfoLine(
+                    definition("steel", "Steel", Set.of("iron", "coal"), GearBase.IRON));
+
+            assertTrue(line.contains("steel"), line);
+            assertTrue(line.contains("Steel"), line);
+            // Set.of is unordered; the listing must not be, so this pins the sort.
+            assertTrue(line.contains("coal + iron"), line);
+        }
+
+        @Test
+        @DisplayName("the fallback describes its match rather than listing no inputs")
+        void fallbackDescribesItsMatch() {
+            String line = ElectricFurnaceCommand.alloyInfoLine(
+                    definition("fused_alloy", "Fused Alloy", Set.of(), GearBase.NETHERITE));
+
+            assertTrue(line.contains("any unmatched mix of metals"), line);
+            assertTrue(line.contains("netherite base"), line);
         }
     }
 }

@@ -564,19 +564,41 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
                 + " ingots").color(NamedTextColor.WHITE));
         sender.sendMessage(Component.text("  mixed alloy   " + config.recycling().yieldMixedAlloy()
                 + " ingots").color(NamedTextColor.WHITE));
+        // "each", not a bare count: the two lines above are per-recipe totals, but since
+        // Task 8 remelt is per item -- N alloy items yield N times this. Without the
+        // qualifier the three lines read as comparable quantities, and they are not.
         sender.sendMessage(Component.text("  alloy remelt  " + config.recycling().yieldRemeltAlloy()
-                + " ingots").color(NamedTextColor.WHITE));
+                + " ingots each").color(NamedTextColor.WHITE));
         sender.sendMessage(Component.text("  input slots   " + config.recycling().slots())
                 .color(NamedTextColor.WHITE));
 
         sender.sendMessage(Component.text("Alloy recipes:").color(NamedTextColor.GRAY));
         for (AlloyDefinition definition : alloys.all()) {
-            String inputs = definition.isFallback()
-                    ? "any unmatched mix of metals"
-                    : String.join(" + ", new java.util.TreeSet<>(definition.inputIds()));
-            sender.sendMessage(Component.text("  " + definition.id() + "  ("
-                    + definition.displayName() + ")  <- " + inputs).color(NamedTextColor.WHITE));
+            sender.sendMessage(Component.text(alloyInfoLine(definition)).color(NamedTextColor.WHITE));
         }
+    }
+
+    /**
+     * One alloy's line in the {@code Alloy recipes:} block of {@code info}, as a plain
+     * string.
+     *
+     * <p>Names the base material because {@code alloys.<id>.base} is otherwise invisible
+     * in play: with no resource pack it is the only thing that makes two alloys' gear
+     * look different, so an operator reading this listing has no other way to tell which
+     * vanilla item a given alloy's gear will be built on.
+     *
+     * <p>The base sits with the display name rather than after the {@code <-}, which
+     * reads as the recipe's inputs -- a base is not something you put in the machine.
+     *
+     * <p>Pure and takes only the Bukkit-free {@link AlloyDefinition}, so it is pinned by
+     * a headless test -- the same pattern as {@link #machineInfoLines}.
+     */
+    static String alloyInfoLine(AlloyDefinition definition) {
+        String inputs = definition.isFallback()
+                ? "any unmatched mix of metals"
+                : String.join(" + ", new java.util.TreeSet<>(definition.inputIds()));
+        return "  " + definition.id() + "  (" + definition.displayName() + ", "
+                + definition.base().id() + " base)  <- " + inputs;
     }
 
     /**

@@ -29,8 +29,11 @@ import java.util.function.Consumer;
  * <p>The balance ceiling is a binding, code-enforced constraint -- not merely
  * documented -- and is applied unconditionally by {@link #fromDefinitions}: there is
  * deliberately no configuration switch to disable it. Any stat exceeding the
- * netherite reference is clamped down to the diamond reference and a warning is
- * logged naming the alloy, the stat, the configured value, and the clamp.
+ * netherite reference is clamped down to the diamond reference, and max durability
+ * and enchantability are additionally floored at 1 because both back
+ * positive-int-coded item data components. Every adjustment logs a warning naming the
+ * alloy, the stat, the configured value, and the replacement. See
+ * {@link #clampStats} for the per-stat detail.
  *
  * <p>{@link #fromDefinitions} is the pure, Bukkit-free core: it takes already-parsed
  * {@link AlloyDefinition}s and is what {@code AlloyRegistryTest} exercises directly,

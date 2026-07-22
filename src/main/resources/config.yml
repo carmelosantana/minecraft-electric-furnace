@@ -78,10 +78,23 @@ recycling:
 # stat may exceed the netherite reference; out-of-range stats are clamped to the
 # diamond reference and logged. This clamp runs unconditionally in code -- there
 # is no switch here to disable it.
+#
+# `base` selects the vanilla material family this alloy's gear is built on: one of
+# copper, iron, gold, diamond, netherite. It is the only thing that makes two alloys'
+# gear look different -- there is no resource pack, so texture comes from the base
+# item. Each family is one of the five vanilla tiers that has both weapon and armor
+# forms. Omit it to accept the thematic default. An unrecognized value warns and falls
+# back to that default.
+#
+# Two bases carry vanilla behaviour worth knowing about: gold makes piglins neutral
+# toward the wearer (driven by an item tag, so it cannot be stripped per item), and
+# netherite grants fire immunity and knockback resistance -- both of which this plugin
+# removes from minted gear.
 alloys:
   steel:
     display-name: "Steel"
     color: "#71797E"
+    base: iron
     lore:
       - "A carbon-hardened iron alloy."
       - "Stronger than iron, cheaper than netherite."
@@ -96,6 +109,7 @@ alloys:
   rose_gold:
     display-name: "Rose Gold"
     color: "#B76E79"
+    base: gold
     lore:
       - "A warm copper-gold blend."
     inputs: [copper, gold]
@@ -109,6 +123,7 @@ alloys:
   ferrocopper:
     display-name: "Ferrocopper"
     color: "#B87333"
+    base: copper
     lore:
       - "Copper toughened with iron."
     inputs: [copper, iron]
@@ -122,6 +137,7 @@ alloys:
   electrum_steel:
     display-name: "Electrum Steel"
     color: "#D4C9A8"
+    base: diamond
     lore:
       - "Gold-veined structural steel."
     inputs: [gold, iron]
@@ -135,6 +151,7 @@ alloys:
   fused_alloy:
     display-name: "Fused Alloy"
     color: "#4B4B4B"
+    base: netherite
     lore:
       - "An unrefined fusion of leftover metals."
     # Fallback: matches any mixed-metal combination not covered by a named recipe
