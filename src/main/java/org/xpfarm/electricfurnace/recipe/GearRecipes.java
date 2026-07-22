@@ -59,8 +59,8 @@ import java.util.function.Supplier;
  * matches no recipe at all, produces no result, and has nothing to hand over when the
  * client clicks. The phantom is a client-side rendering artifact, not a live craft.
  *
- * <p>{@link #onPrepareCraft} therefore guards two different things, neither of them
- * that phantom -- see its own javadoc.
+ * <p>{@link #onPrepareCraft} therefore exists for other reasons entirely -- a
+ * permission gate and an anti-laundering guard -- described in its own javadoc.
  *
  * <p>Registration always removes the key first, like {@link MachineRecipe}, because
  * {@code Bukkit.addRecipe} throws on a duplicate {@link NamespacedKey} and recipes
@@ -190,10 +190,10 @@ public final class GearRecipes implements Listener {
      * be empty, and an {@code allMatch} over no viewers permits the craft for everyone.
      *
      * <p><b>One of ours: every non-stick ingredient must be stamped.</b> A redundant
-     * backstop in practice --
-     * {@code ExactChoice} has already validated every ingredient by the time this runs,
-     * so the loop cannot currently fire. It is kept as a cheap invariant check that
-     * would catch a future ingredient switched away from {@code ExactChoice}.
+     * backstop in practice -- {@code ExactChoice} has already validated every ingredient
+     * by the time this runs, so this branch cannot currently fire. It is kept as a cheap
+     * invariant check that would catch an ingredient switched away from
+     * {@code ExactChoice} in future.
      *
      * <p><b>Anyone else's recipe: no stamped ingredient may be consumed at all.</b>
      * This is the arm that does real work, and it closes two live leaks:
@@ -222,8 +222,14 @@ public final class GearRecipes implements Listener {
      * alloy ingot or a piece of alloy gear either launders it or strips its identity.
      *
      * <p>The stamp test is on the {@code xpfarm:custom_material} <b>value</b>, not on
-     * the key merely being present. That namespace is a shared cross-plugin contract, so
-     * a sibling plugin's stamped items must stay this handler's business to leave alone.
+     * the key merely being present. That namespace is a shared cross-plugin contract: an
+     * item minted by a sibling {@code xpfarm:} plugin is that plugin's to protect, and
+     * blanking crafts over it here would be this plugin overreaching.
+     *
+     * <p><b>Known trade-off.</b> This would also blank a recipe another plugin
+     * deliberately registered to consume an alloy ingot. None exists today, and the
+     * asymmetry is intentional -- an unwanted blank is a craft that does not happen,
+     * whereas the leak it prevents is permanent.
      */
     @EventHandler
     public void onPrepareCraft(PrepareItemCraftEvent event) {

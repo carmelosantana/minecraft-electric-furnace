@@ -28,8 +28,9 @@ import java.util.stream.Collectors;
  * or its tests -- every input is a plain {@link RecycleInput}, every yield number
  * comes from the caller-supplied {@link RecyclingSettings}, never hardcoded here.
  *
- * <p>Resolution proceeds through nine rules, in this exact precedence order. Each
- * rule is checked only after every earlier rule has failed to apply:
+ * <p>Resolution proceeds through nine rules. The first eight run in this exact
+ * precedence order, each checked only after every earlier rule has failed to apply;
+ * the ninth is a guard on the outcome the first eight chose:
  *
  * <ol>
  *   <li>Empty input -&gt; {@code REJECTED("empty")}.</li>
