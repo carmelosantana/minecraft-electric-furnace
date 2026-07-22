@@ -6,7 +6,7 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 - Slug: `electric-furnace`
 - Repository: `carmelosantana/minecraft-electric-furnace`
 - Owner: `Carmelo Santana`
-- Target version: `0.2.1`
+- Target version: `0.3.0`
 - Paper version: `26.1.2 build 74`
 - Java version: `25`
 - Updater destination: `electric-furnace.jar`
@@ -34,6 +34,22 @@ running with nobody watching survives chunk unload, world save, and a full serve
 restart. This is layered on top of, not a replacement for, the chunk-PDC
 **location** registry (`MachineRegistry`) the v1 design above describes.
 
+**Alloy gear crafting (`0.3.0`, planned 2026-07-21):**
+[docs/superpowers/specs/2026-07-21-alloy-gear-crafting-design.md](superpowers/specs/2026-07-21-alloy-gear-crafting-design.md).
+Delivers the "alloy armor and weapons deferred to v2" limitation recorded against
+`0.1.0`, which is struck from Known limitations below. Adds 30
+craftable items -- sword, axe, helmet, chestplate, leggings, boots x 5 alloys --
+whose per-piece stats are **derived** from each alloy's existing single `AlloyStats`
+block (armor total split by vanilla's `3/8/6/3` shape with largest-remainder
+rounding; durability interpolated from the tool-scale reference onto vanilla's armor
+base unit). Recipes are crafting-table `ShapedRecipe`s using `RecipeChoice.ExactChoice`,
+which matches the full data-component map and so cannot be satisfied by a vanilla
+netherite ingot. Each alloy gets a **distinct vanilla base material** (steel->iron,
+rose_gold->gold, ferrocopper->copper, electrum_steel->diamond, fused_alloy->netherite)
+for visual identity without a resource pack. `RecycleResolver` rule 2 relaxes from
+"exactly one alloy item" to "all inputs are the same alloy", so a four-piece set
+remelts. No new permission node.
+
 ## 1. Scope
 
 - [x] Status is explicitly recorded as active, experimental, or excluded.
@@ -47,14 +63,19 @@ recycles metal gear back into ingots — five of the same metal returns ingots o
 metal, while a mix fuses into a stronger alloy. Worn-out gear finally has somewhere
 to go.
 
+**From `0.3.0`,** those alloys are worth something: each of the five crafts a full
+set of gear — sword, axe, helmet, chestplate, leggings, boots — with its own stats,
+built on its own vanilla base material so Steel and Rose Gold are told apart at a
+glance. Alloy gear recycles back into its own ingots, closing the loop.
+
 ### Commands
 
 | Command | Args | Permission | Purpose |
 |---|---|---|---|
 | `/electricfurnace give` | `[player] [amount]` | `electricfurnace.give` (op) | Issue the machine item |
-| `/electricfurnace alloy` | `<id> [amount]` | `electricfurnace.give` (op) | Issue an alloy ingot, for testing |
+| `/electricfurnace alloy` | `<id> [piece] [amount]` | `electricfurnace.give` (op) | Issue an alloy ingot, or a gear piece when `piece` is given (`0.3.0`) |
 | `/electricfurnace reload` | — | `electricfurnace.reload` (op) | Reload config |
-| `/electricfurnace info` | — | `electricfurnace.use` (true) | Show machine tuning, yields, and alloy recipes |
+| `/electricfurnace info` | — | `electricfurnace.use` (true) | Show machine tuning, yields, alloy recipes, and each alloy's gear base material (`0.3.0`) |
 
 ### Events
 
@@ -74,6 +95,13 @@ live machine's state on every autosave, not only on a clean shutdown),
 `EntityExplodeEvent` / `BlockExplodeEvent` (salvage instead of vanilla-destroy),
 `BlockPistonExtendEvent` / `BlockPistonRetractEvent` (refuse to displace a
 registered machine).
+
+**Alloy gear (`0.3.0`):** `PrepareItemCraftEvent` (null the craft result when the
+grid's ingredients are not genuinely PDC-stamped -- a backstop against the Bedrock
+false-positive path, since `ExactChoice` already rejects correctly on Java),
+`PlayerJoinEvent` (`Player#discoverRecipe` for the 30 gear recipes; since 1.21.2 the
+server sends only unlocked recipes and `Bukkit.addRecipe` unlocks nothing, so without
+this the recipe book is empty on **both** editions).
 
 ### Permissions
 
@@ -104,6 +132,16 @@ actively advancing, rather than a fixed quantity consumed per completed operatio
 `machine.smelt-speed-multiplier`'s default also changed, `2.0` → `2.5`, giving `80`
 ticks (~4s) per item at default settings.
 
+**Alloy gear (`0.3.0`)** adds exactly one optional key per alloy:
+`alloys.<id>.base` (one of `copper`, `iron`, `gold`, `diamond`, `netherite`),
+defaulting to the mapping in the gear spec. An unrecognized value warns naming the
+alloy, key, offending value, and the default it fell back to, then registers that
+alloy's gear on the default base -- consistent with every other key here. There is
+deliberately **no** `gear.enabled` master switch: an operator who wants no alloy gear
+can remove the alloys. The balance ceiling needs no new configuration and no second
+clamp, because `AlloyRegistry.clampStats` already runs before any per-piece
+derivation, so gear inherits clamped values automatically.
+
 An earlier draft listed `alloys.balance-ceiling.enabled`. It was **not implemented,
 deliberately** — a ceiling an operator can switch off is not a ceiling. The clamp is
 unconditional in `AlloyRegistry` and warns naming the alloy, stat, configured value,
@@ -131,6 +169,13 @@ and clamp target.
 
 Items carry a **shared** cross-plugin contract: `xpfarm:custom_material` and
 `xpfarm:material_id` (both `STRING`).
+
+**Alloy gear (`0.3.0`)** carries those same two keys -- which is exactly why gear
+needs no recycler precedence change, since `MetalClassifier.resolveBranch` already
+ranks `isAlloyStamped` above the material table -- plus one new key,
+`xpfarm:gear_piece` (`STRING`, e.g. `"chestplate"`). The new key exists so gear is
+distinguishable from an ingot without inspecting base material, which now varies per
+alloy. Gear adds no new storage: it is item state, not machine state.
 
 ### Dependencies
 
@@ -167,9 +212,77 @@ constructor — **no jar dependency in either direction.**
 14. Particles are visible to a Bedrock client; absent sound does not error.
 15. Config reload applies new yields without a restart.
 
+**Alloy gear (`0.3.0`):**
+
+16. Crafting a Steel Sword from 2 Steel ingots + 1 stick yields an iron-base sword
+    named "Steel Sword" carrying all three PDC keys.
+17. The same shape built from **vanilla** netherite ingots yields nothing — no
+    output, no error, no item.
+18. Each alloy's four armor pieces' armor points sum to exactly the configured
+    `armor` total. Steel → 2/7/5/2 = 16.
+19. Steel armor durability derives to 231/336/315/273; Steel weapons to 700.
+20. An alloy configured above the netherite reference is clamped by `AlloyRegistry`
+    *before* derivation, and its gear reflects the clamped values.
+21. A Fused Alloy sword dropped in lava burns — fire immunity is stripped from the
+    netherite base via `unsetData(DAMAGE_RESISTANT)`, not `resetData`.
+22. No alloy armor grants knockback resistance, including Fused Alloy.
+23. Gear attack damage and armor include the merged vanilla defaults — a Steel Sword
+    does its derived damage, not the bare modifier value.
+24. Recycling 4 Steel armor pieces yields `4 × yield-remelt-alloy` Steel ingots.
+25. Recycling a Steel sword and a Rose Gold sword together rejects with
+    `"mixed alloys"`, not `"non-metal input"`.
+26. `/electricfurnace reload` leaves exactly 30 registered recipes, not 60.
+27. All 30 recipes appear in the Java recipe book after joining.
+28. A Bedrock client can craft each of the six Steel pieces by manual placement.
+29. `GearStatsDeriver` unit tests pass for all five alloys × six pieces, plus the
+    rounding-tiebreak and interpolation-endpoint cases.
+
 ### Known limitations
 
-- **Alloy armor and weapons deferred to v2.** v1 produces ingots with defined stats only.
+**Alloy gear (`0.3.0`)** — replaces the former "alloy armor and weapons deferred to
+v2" limitation, which this version delivers:
+
+- **Tools and spears are still not implemented.** Pickaxe/shovel/hoe need a
+  mining-speed or harvest-tier field `AlloyStats` does not have, plus a per-alloy
+  "can it mine obsidian" decision. Spears (`IRON_SPEAR`/`COPPER_SPEAR`/`NETHERITE_SPEAR`
+  exist in this version and are already in `MetalClassifier.METAL_TABLE`) are cheap to
+  add, but their throwing/reach behaviour interacts with attack-speed modifiers in ways
+  worth verifying separately. Deliberate, not an oversight.
+- **Enchantability is Java-only.** `ItemMeta#setEnchantable` is stable API and works on
+  Java, but Geyser reads enchantability from the item **type** at handshake
+  registration, never per stack, so a Bedrock player sees the base material's value.
+  Whether Bedrock refuses to *place* an item its own definition marks non-enchantable
+  is UNRESOLVED and is a gate 7a check.
+- **Max durability is Java-only in display.** Geyser scales the durability bar against
+  the item type's vanilla maximum. Durability *loss* is server-authoritative and
+  correct; only the bar's scale is wrong — a Steel Sword shows a 700-point bar on Java
+  and a 2031-point bar on Bedrock while wearing out identically.
+- **Attack speed has essentially no Bedrock feedback.** Bedrock still uses 1.8 combat;
+  Geyser offers only a cosmetic cooldown indicator. The modifier changes server-side
+  damage scaling with almost no client signal.
+- **Attribute tooltips on Bedrock are synthesized lore and are buggy for tools.**
+  Geyser renders Java modifiers as lore; [Geyser #5037](https://github.com/GeyserMC/Geyser/issues/5037)
+  reports tools showing base-item defaults while armor displays correctly. Real damage
+  and armor are correct — combat is server-side — so this is cosmetic.
+- **Rose Gold gear makes piglins neutral.** Driven by the `#minecraft:piglin_safe_armor`
+  **item tag**, not a component, so no per-item lever exists. Accepted as flavour for a
+  gold alloy rather than fixed.
+- **Anvil-renaming an alloy ingot breaks its recipes.** `ExactChoice` compares display
+  name and lore alongside PDC, so a renamed ingot no longer matches.
+- **Bedrock crafting flickers, and a phantom output is reachable.** Bedrock's recipe
+  ingredient wire format has **no NBT field at all** (descriptor set is
+  `DEFAULT, MOLANG, ITEM_TAG, DEFERRED, COMPLEX_ALIAS`), so all 30 recipes reach a
+  Bedrock client as "netherite_ingot ×N + stick". Real crafting still works — Geyser
+  synthesizes a one-off recipe from the actual grid stacks on a 150 ms delay — but a
+  player laying out *vanilla* netherite ingots in one of these shapes sees a fake
+  output; clicking it yields nothing, caught by the `PrepareItemCraftEvent` backstop.
+  This is a client limitation, not a Geyser gap: GeyserMC closed the equivalent
+  smithing request ([#4706](https://github.com/GeyserMC/Geyser/issues/4706)) as
+  *Can't Fix / Missing Client Feature*. Exact on-screen presentation is UNRESOLVED and
+  is a gate 7a check.
+
+**Machine (`0.1.0`–`0.2.1`):**
+
 - **No custom textures on any platform.** Bedrock constraint: `custom_model_data` and the 1.21.4 `item_model` component both require a separately authored Bedrock resource pack ([Geyser custom items](https://geysermc.org/wiki/geyser/custom-items/)); display entities are untranslated and invisible to Bedrock ([Geyser #3810](https://github.com/GeyserMC/Geyser/issues/3810)). The machine looks like a blast furnace with particle and sound identity.
 - **Colored `DUST` particles unusable** — color does not survive to Bedrock ([Geyser #1937](https://github.com/GeyserMC/Geyser/issues/1937)). `ELECTRIC_SPARK` and `CAMPFIRE_COSY_SMOKE` are confirmed mapped and used instead.
 - **Player-head (Slimefun-style) visuals deferred to Phase 2.** Requires Geyser `custom-skulls.yml` as a deployment dependency and inherits [Geyser #5923](https://github.com/GeyserMC/Geyser/issues/5923), where registered skulls swallow Bedrock interact events — which would break right-click-to-open.
