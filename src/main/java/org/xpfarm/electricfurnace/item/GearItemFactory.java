@@ -116,8 +116,10 @@ public final class GearItemFactory {
      *
      * <p><b>Writing any modifier replaces the item type's vanilla defaults rather than
      * merging with them</b>, so every stat the item should have must be written here.
-     * Adding only {@code +2 ATTACK_DAMAGE} to a netherite sword would yield a sword
-     * dealing 2 damage, not 10.
+     * Writing only a {@code +2 ATTACK_DAMAGE} modifier onto a netherite sword discards
+     * its vanilla {@code +7} rather than adding to it, leaving a sword that displays
+     * 3.0 -- the player's 1.0 base plus the 2.0 modifier -- where the vanilla sword
+     * displays 8.0.
      *
      * <p>Netherite's knockback resistance disappears as a welcome side effect of that
      * same replacement: it is simply never written back. Do <b>not</b> write an empty
