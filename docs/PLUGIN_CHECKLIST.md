@@ -339,6 +339,22 @@ unchanged; the contradiction is not propagated.
 
 ## 4. Compatibility
 
+### `api-version` raised `'1.21'` → `'26.1'` (2026-07-22, post-`0.3.0`, unreleased)
+
+The deferral recorded against `0.3.0` (gate 6 below) is now closed. The declaration was
+stale — the plugin already compiled against the 26.1.2 API — and leaving it stale kept
+Paper's legacy bytecode rewrites switched on. Treated as a **compatibility** change, not
+metadata, per `PLUGIN_LIFECYCLE.md` §4: it alters the bytecode Paper loads, so gate 6 and
+gate 7a were both re-run rather than a bare recompile being accepted. Evidence in gate 6
+and gate 7a below. Two files changed and nothing else:
+`src/main/resources/plugin.yml` and `PluginDescriptorTest.java`'s matching assertion,
+which pinned the old value and would otherwise have gone green against a stale
+descriptor. No source change, no behaviour change, no config change.
+
+The other `1.21`-shaped strings in the tree are unrelated *minimum Minecraft version*
+comments (`1.21.2` recipe-book behaviour, `1.21.9` copper equipment) and were correctly
+left alone.
+
 **Alloy gear (`0.3.0`) note — reviewed, one new interaction surface.** The branch adds
 its first genuinely new player-facing surface since `0.1.0`: a crafting table. Reviewed
 against the Geyser/Floodgate/ViaVersion rules and verified live at gate 7a where
@@ -379,11 +395,15 @@ struck. The compile check does have fresh evidence from this fix pass (below). N
 of this substitutes for a live client join, which remains gate 7a's job and is
 recorded outstanding for this branch below.
 
-- [x] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '1.21'`.
-  - `mvn clean verify` BUILD SUCCESS. Embedded `plugin.yml` confirmed `api-version: '1.21'`.
-  - **Re-verified for `0.2.0` (continuous-operation fix pass, 2026-07-20):** see
-    Gate 6 below for the fresh `mvn --batch-mode --no-transfer-progress clean verify`
-    run and its exact output.
+- [x] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '26.1'`.
+  - **Current (2026-07-22):** raised to `'26.1'`, the standard for Paper 26.1.2 build 74.
+    `mvn --batch-mode --no-transfer-progress clean verify` BUILD SUCCESS on Temurin
+    25.0.3+9; embedded `plugin.yml` in the shaded JAR confirmed `api-version: '26.1'`.
+    Runtime-confirmed at gate 7a — Paper loaded and enabled the plugin with the legacy
+    rewrites off, and logged no `InvalidDescriptionException` and no legacy/`Commodore`
+    notice.
+  - *History:* previously `'1.21'`, verified as such for `0.1.0`, `0.2.0` and `0.3.0`.
+    Those records below are kept as history and do not describe the current descriptor.
 - [x] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared.
   - **None.** No `depend`, `softdepend`, or `loadbefore`/`loadafter` entries, deliberately.
     CopperKingdom interop is read-only via `NamespacedKey`'s String constructor, which
@@ -423,7 +443,37 @@ recorded outstanding for this branch below.
 
 ## 6. Tests and build
 
-### `0.3.0` (alloy gear crafting) — current, supersedes everything below
+### `api-version` raise to `'26.1'` — current, supersedes everything below (2026-07-22)
+
+Re-run in full because this is a compatibility change, not metadata — a green compile
+was explicitly **not** accepted as sufficient evidence.
+
+`mvn --batch-mode --no-transfer-progress clean verify` → **exit 0, BUILD SUCCESS,
+416 tests, 0 failures, 0 errors, 0 skipped**, 8.2s, on Temurin 25.0.3+9. Test count
+unchanged from `0.3.0` (416): this change adds no test, it corrects one existing
+assertion. The two pre-existing `HOTBAR_MOVE_AND_READD` deprecation warnings in
+`MachineGuiListenerTest.java` are unaffected; no new warnings.
+
+**`PluginDescriptorTest` did assert the value and was updated.**
+`PluginDescriptorTest.java:84` held `assertEquals("1.21", parsed.get("api-version"))` —
+so the descriptor test was the one thing that would have failed on a plugin.yml-only
+edit, and it did its job. Now `assertEquals("26.1", ...)`. The neighbouring
+`assertInstanceOf(String.class, ...)` guard is unchanged and still load-bearing:
+unquoted, `26.1` parses as a double, which is the exact defect that guard exists for.
+
+Shaded JAR `target/electric-furnace-0.3.0.jar` inspected — never an `original-*`
+intermediate. Embedded `plugin.yml` reads `version: '0.3.0'`,
+`main: org.xpfarm.electricfurnace.ElectricFurnacePlugin`, **`api-version: '26.1'`**, the
+`electricfurnace` command with its `ef` alias, and all four permission nodes. JAR entry
+roots are exactly `org/xpfarm`, `config.yml`, `plugin.yml`, `META-INF` — no server API
+bundled (`org/bukkit`, `io/papermc`, `net/minecraft`, `com/mojang` all absent, paper-api
+correctly `provided`), no third-party libraries shaded, no secret-bearing file.
+
+**Version not bumped.** The JAR still reads `0.3.0`, which is already tagged and
+released. This change is unreleased and belongs to the next release; the version
+decision is `minecraft-plugin-release`'s, not this gate's.
+
+### `0.3.0` (alloy gear crafting) — supersedes everything below it
 
 `mvn --batch-mode --no-transfer-progress clean verify` → **exit 0, BUILD SUCCESS,
 416 tests, 0 failures, 0 errors, 0 skipped** (2026-07-22, run directly by the
@@ -438,13 +488,15 @@ Shaded JAR `target/electric-furnace-0.3.0.jar` inspected — never an `original-
 intermediate. Embedded `plugin.yml` reads `version: '0.3.0'`,
 `main: org.xpfarm.electricfurnace.ElectricFurnacePlugin`, `api-version: '1.21'`.
 
-**`api-version` deliberately left at `'1.21'` for this release.** The current standard
-is `'26.1'`, and the declaration is stale — the plugin already compiles against the
-26.1.2 API. Raising it is a *compatibility* change, not metadata: it switches off
-Paper's legacy bytecode rewrites and so requires gate 6 and gate 7a re-run. It was held
-back so `0.3.0` ships one variable rather than two — 30 new recipes plus a new
-item-minting path plus a bytecode-loading change would have made any failure
-unattributable. Filed as its own task with its own 7a run.
+**`api-version` deliberately left at `'1.21'` for this release — CLOSED 2026-07-22.**
+The current standard is `'26.1'`, and the declaration is stale — the plugin already
+compiles against the 26.1.2 API. Raising it is a *compatibility* change, not metadata:
+it switches off Paper's legacy bytecode rewrites and so requires gate 6 and gate 7a
+re-run. It was held back so `0.3.0` ships one variable rather than two — 30 new recipes
+plus a new item-minting path plus a bytecode-loading change would have made any failure
+unattributable. **Now raised on its own, with its own gate 6 and gate 7a runs, recorded
+in the current section at the top of this gate and in gate 7a below.** Deferring it paid
+off as intended: the 7a run isolated one variable, so its green result is attributable.
 
 **Test growth:** 311 tracked at branch point → **416**. The pure core
 (`GearPiece`, `GearStatsDeriver`, `GearStats`, `GearBase`) is exhaustively covered with
@@ -517,6 +569,81 @@ pass (continuous-operation, targeting `0.2.0`) replaces them immediately below.
   excluded from release assets by the workflow's `! -name 'original-*'` filter.
 
 ## 7. Matrix
+
+### 7a — Single-plugin runtime verification — PASSED for the `api-version` raise to `'26.1'` (2026-07-22)
+
+Re-run because raising `api-version` changes which bytecode Paper loads. This is the
+point of the whole exercise: a green `mvn verify` proves the source still compiles, and
+proves nothing about a plugin whose bytecode the server now declines to rewrite.
+
+Booted on a fresh disposable Legendary stack via the shared rig
+(`scripts/test-stack.sh up` → slot 1, java 25601, bedrock 19201, rcon 25576; project
+`xpfarm-plugin-test-nostalgic-leavitt-a50554-6b8e307f`). The rig's three preconditions
+all passed: Paper's own `Done (25.949s)! For help` line; a real Minecraft protocol
+handshake on the Java port (`Paper 26.1.2 | protocol 775`, `PLAYERS: 0 / 20`), not merely
+a TCP connect; and RCON `plugins` listing this plugin **green**.
+
+**The load path itself is the thing under test, and it is clean.** With the legacy
+rewrites now off, Paper still logged `Loading server plugin ElectricFurnace v0.3.0` →
+`Enabling ElectricFurnace v0.3.0` → `ElectricFurnace enabled (5 alloys, effects on,
+ticker on).` No `InvalidDescriptionException`, no `Could not load`, and no
+legacy/`Commodore`/rewrite notice anywhere in the log — the plugin is neither absent
+(unparseable descriptor) nor red (`onEnable()` threw).
+
+**Whole cross-play stack green together:** `ElectricFurnace`, `floodgate`,
+`Geyser-Spigot`, `ViaVersion` — all four enabled, none red, none absent. Companion
+versions unchanged from the `0.3.0` run: Geyser-Spigot 2.11.0-SNAPSHOT, ViaVersion
+5.11.0, floodgate 2.2.5-SNAPSHOT (b138-fc99cfc).
+
+**Exercised over RCON against the rewritten-bytecode-free load, all passing:**
+
+- `/electricfurnace info` — full render, byte-identical in substance to the `0.3.0` run:
+  machine tuning (2.5x, 80 ticks, 200 ticks per dust), yields, and all five alloys with
+  their gear base materials (`electrum_steel … diamond base`, `ferrocopper … copper base`,
+  `rose_gold … gold base`, `fused_alloy … netherite base`, `steel … iron base`). This
+  exercises `EfConfig.load`, `AlloyRegistry.load` and `GearBase` resolution on the new
+  load path. Zero `has no <piece> on this server` lines, so vanilla copper equipment
+  still resolves.
+- `/electricfurnace reload` — clean, `ElectricFurnace configuration reloaded.` No
+  duplicate-`NamespacedKey` throw, so all 30 gear recipes still unregister and re-register
+  correctly.
+- **Error paths:** `alloy nosuchalloy` → `Unknown alloy 'nosuchalloy'. Try
+  /electricfurnace info.`; `ef notasubcommand` → `Unknown subcommand` plus the usage line
+  carrying `[piece]`. Command dispatch, the `ef` alias, and argument parsing all intact.
+- **Logs clean throughout** — startup, enable, reload, command invocations, and shutdown
+  produced zero exceptions, zero `SEVERE`, zero `org.xpfarm` stack frames, zero plugin
+  warnings, and no leaked secrets. The only two log hits matching an error-shaped pattern
+  are both unrelated and pre-existing: vanilla's `Failed to parse level-type default`,
+  and a JVM `sun.misc.Unsafe` terminal-deprecation notice from a server-side library.
+- **Clean teardown.** `scripts/test-stack.sh down` removed container, volume and network
+  and released the slot lease; no stack and no lease leaked.
+
+#### What this 7a run could NOT reach
+
+No client attached to this stack, by design. **The entire gate 12 play-test obligation
+recorded for `0.3.0` below stands unchanged and is carried forward** — every item on that
+eight-point list (crafting each alloy's gear, reading the tooltips, Fused Alloy's lava and
+knockback checks, Bedrock manual placement and the phantom recipe, the three laundering
+paths, set recycling, revoked-`craft` behaviour, and the mint-then-reload gap) is still
+unproven, and is now unproven under a *different bytecode load path* than the one those
+items were written against. Nothing here narrows that list; this run only proves the
+plugin still loads, enables, reads its config and answers commands with the legacy
+rewrites off.
+
+Specifically unreachable here:
+
+- **Every event went unexercised** — no `PrepareItemCraftEvent`, `PlayerJoinEvent`,
+  `BlockPlaceEvent`, `InventoryClickEvent`, `InventoryMoveItemEvent`, or redstone event
+  fired. RCON proves a command ran, not that an event fired. The RCON test-harness plugin
+  specified in `PLUGIN_LIFECYCLE.md` §7 still does not exist.
+- **No gear item was minted.** Console has no inventory, so
+  `/electricfurnace alloy <id> <piece>` cannot execute `GearItemFactory.create` — the same
+  limitation as the `0.3.0` run.
+- **Nothing a client renders** — Bedrock form and inventory behaviour, tooltip values,
+  item textures — is provable headlessly at all.
+
+**No external-service negative path applies:** this plugin makes no outbound calls
+(`External services: none`).
 
 ### 7a — Single-plugin runtime verification — PASSED for `0.3.0` (2026-07-22)
 

@@ -1,7 +1,7 @@
 name: ElectricFurnace
 version: '${project.version}'
 main: org.xpfarm.electricfurnace.ElectricFurnacePlugin
-api-version: '1.21'
+api-version: '26.1'
 author: Carmelo Santana
 website: https://xpfarm.org
 description: Redstone-powered smelter that recycles metal gear into ingots and fuses mixed metals into alloys

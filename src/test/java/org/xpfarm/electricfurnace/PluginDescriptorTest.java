@@ -81,7 +81,7 @@ final class PluginDescriptorTest {
         assertEquals("org.xpfarm.electricfurnace.ElectricFurnacePlugin", parsed.get("main"));
         assertInstanceOf(String.class, parsed.get("api-version"),
                 "api-version must be quoted; unquoted it parses as a double and 1.20 becomes 1.2");
-        assertEquals("1.21", parsed.get("api-version"));
+        assertEquals("26.1", parsed.get("api-version"));
         assertNotNull(parsed.get("description"), "description is required");
 
         Object version = parsed.get("version");
