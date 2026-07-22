@@ -61,7 +61,18 @@ class RecycleResolverTest {
         assertEquals("empty", rejected.reason());
     }
 
-    // ---- Rule 2: single alloy item remelts, the only exception to the slot count ----
+    @Test
+    void rule1_beatsRule2_emptyInputIsNotAVacuouslyAllAlloyRemelt() {
+        // "Every input is an alloy" is vacuously true of no inputs at all, so rule 2's
+        // all-alloy check would happily claim an empty recycler -- and then read element
+        // zero of an empty list. Rule 1 must get there first.
+        RecycleResult result = RecycleResolver.resolve(List.of(), DEFAULT_SETTINGS, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("empty", rejected.reason());
+    }
+
+    // ---- Rule 2: all-alloy input remelts, the only exception to the slot count ------
 
     @Test
     void rule2_singleAlloyItem_remelts() {
@@ -70,6 +81,81 @@ class RecycleResolverTest {
         RecycleResult.Remelt remelt = assertInstanceOf(RecycleResult.Remelt.class, result);
         assertEquals("steel", remelt.alloyId());
         assertEquals(1, remelt.amount());
+    }
+
+    @Test
+    void rule2_fourPieceAlloyArmourSet_remeltsAtFourTimesTheYield() {
+        List<RecycleInput> inputs = List.of(alloy("steel"), alloy("steel"), alloy("steel"), alloy("steel"));
+
+        RecycleResult result = RecycleResolver.resolve(inputs, DEFAULT_SETTINGS, REGISTRY);
+
+        RecycleResult.Remelt remelt = assertInstanceOf(RecycleResult.Remelt.class, result);
+        assertEquals("steel", remelt.alloyId());
+        assertEquals(4 * DEFAULT_SETTINGS.yieldRemeltAlloy(), remelt.amount());
+    }
+
+    @Test
+    void rule2_remeltAmountIsItemCountTimesConfiguredYield_neitherAlone() {
+        // yield 10, three items: 30 distinguishes `n * yield` from both a bare item count
+        // and a bare per-item yield, which 4 * 1 = 4 under the shipping defaults cannot.
+        RecyclingSettings settings = new RecyclingSettings(5, 30, 20, 10, true);
+        List<RecycleInput> inputs = List.of(alloy("steel"), alloy("steel"), alloy("steel"));
+
+        RecycleResult result = RecycleResolver.resolve(inputs, settings, REGISTRY);
+
+        RecycleResult.Remelt remelt = assertInstanceOf(RecycleResult.Remelt.class, result);
+        assertEquals(30, remelt.amount());
+    }
+
+    @Test
+    void rule2_beatsRule3_twoAlloysBelowTheSlotCount_stillRemelt() {
+        // Remelt remains the one path accepting fewer than `slots` items, so rule 2 must
+        // stay ahead of the slot-count rule -- two items at slots=5 must not be rejected.
+        List<RecycleInput> inputs = List.of(alloy("rose_gold"), alloy("rose_gold"));
+
+        RecycleResult result = RecycleResolver.resolve(inputs, DEFAULT_SETTINGS, REGISTRY);
+
+        RecycleResult.Remelt remelt = assertInstanceOf(RecycleResult.Remelt.class, result);
+        assertEquals("rose_gold", remelt.alloyId());
+        assertEquals(2, remelt.amount());
+    }
+
+    @Test
+    void rule2_mixedAlloyIds_rejectedByName() {
+        List<RecycleInput> inputs = List.of(alloy("steel"), alloy("rose_gold"));
+
+        RecycleResult result = RecycleResolver.resolve(inputs, DEFAULT_SETTINGS, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("mixed alloys", rejected.reason());
+    }
+
+    @Test
+    void rule2_mixedAlloyIds_rejectedWhicheverIdComesFirst() {
+        // A "take the first id and remelt" implementation would silently turn either of
+        // these into a full batch of whichever alloy happened to lead the list.
+        List<RecycleInput> steelFirst =
+                List.of(alloy("steel"), alloy("steel"), alloy("steel"), alloy("steel"), alloy("rose_gold"));
+        List<RecycleInput> roseGoldFirst =
+                List.of(alloy("rose_gold"), alloy("steel"), alloy("steel"), alloy("steel"), alloy("steel"));
+
+        RecycleResult.Rejected first = assertInstanceOf(RecycleResult.Rejected.class,
+                RecycleResolver.resolve(steelFirst, DEFAULT_SETTINGS, REGISTRY));
+        RecycleResult.Rejected second = assertInstanceOf(RecycleResult.Rejected.class,
+                RecycleResolver.resolve(roseGoldFirst, DEFAULT_SETTINGS, REGISTRY));
+
+        assertEquals("mixed alloys", first.reason());
+        assertEquals("mixed alloys", second.reason());
+    }
+
+    @Test
+    void rule2_mixedAlloyIdsBelowTheSlotCount_rejectAsMixed_notAsTooFewItems() {
+        List<RecycleInput> inputs = List.of(alloy("steel"), alloy("ferrocopper"));
+
+        RecycleResult result = RecycleResolver.resolve(inputs, DEFAULT_SETTINGS, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("mixed alloys", rejected.reason());
     }
 
     @Test
@@ -114,10 +200,35 @@ class RecycleResolverTest {
     }
 
     @Test
-    void rule4_alloyItemAmongOthers_isTreatedAsNonMetalInput() {
-        // A single alloy item alone remelts (rule 2); mixed with anything else it is
-        // neither a metal nor a modifier, so it falls through to rule 4.
+    void rule4_alloyItemMixedWithPlainMetal_isStillANonMetalInput() {
+        // Rule 2 now remelts a batch of alloy items, but only when EVERY input is an
+        // alloy. One alloy among plain ingots is not all-alloy, so it falls through to
+        // rule 4, where an alloy item is neither a metal nor a modifier -- unchanged
+        // behaviour, and the reason this rule keeps its "non-metal input" wording.
         List<RecycleInput> inputs = List.of(iron(), iron(), iron(), iron(), alloy("steel"));
+
+        RecycleResult result = RecycleResolver.resolve(inputs, DEFAULT_SETTINGS, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("non-metal input", rejected.reason());
+    }
+
+    @Test
+    void rule4_severalAlloyItemsMixedWithPlainMetal_isStillANonMetalInput() {
+        // Two alloys of the SAME id among ingots: still not all-alloy, so rule 2 must not
+        // fire on the mere presence of alloys, nor on their sharing an id.
+        List<RecycleInput> inputs = List.of(alloy("steel"), alloy("steel"), iron(), iron(), iron());
+
+        RecycleResult result = RecycleResolver.resolve(inputs, DEFAULT_SETTINGS, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("non-metal input", rejected.reason());
+    }
+
+    @Test
+    void rule4_alloyItemsMixedWithAModifier_isStillANonMetalInput() {
+        // Coal is a modifier, not an alloy, so alloys plus coal is not all-alloy either.
+        List<RecycleInput> inputs = List.of(alloy("steel"), alloy("steel"), alloy("steel"), alloy("steel"), coal());
 
         RecycleResult result = RecycleResolver.resolve(inputs, DEFAULT_SETTINGS, REGISTRY);
 

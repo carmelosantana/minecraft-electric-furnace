@@ -33,13 +33,15 @@ import java.util.stream.Collectors;
  *
  * <ol>
  *   <li>Empty input -&gt; {@code REJECTED("empty")}.</li>
- *   <li>A single alloy item -&gt; {@code REMELT}. The <b>only</b> case that accepts
- *       fewer than {@code recycling.slots} items.</li>
+ *   <li>Every input is an alloy item -&gt; {@code REMELT} at
+ *       {@code n x yield-remelt-alloy}, or {@code REJECTED("mixed alloys")} if the
+ *       alloy ids differ. The <b>only</b> case that accepts fewer than
+ *       {@code recycling.slots} items.</li>
  *   <li>Fewer than {@code recycling.slots} items (any composition) -&gt;
  *       {@code REJECTED("needs N items")}.</li>
  *   <li>Any input that is neither a metal nor a modifier -&gt;
- *       {@code REJECTED("non-metal input")}. This also catches an alloy item that is
- *       not alone (rule 2 already handled the sole-alloy case).</li>
+ *       {@code REJECTED("non-metal input")}. This also catches an alloy item mixed in
+ *       with non-alloys (rule 2 already handled the all-alloy case).</li>
  *   <li>Only modifiers, no metals at all (e.g. 5 coal) -&gt;
  *       {@code REJECTED("no metal")}. Coal alone is never recyclable.</li>
  *   <li>All metals identical <b>and no modifier present</b> -&gt; {@code SAME_METAL}.</li>
@@ -81,13 +83,24 @@ public final class RecycleResolver {
             return new RecycleResult.Rejected("empty");
         }
 
-        // Rule 2: a single alloy item remelts -- the only case accepting fewer than
+        // Rule 2: every input is an alloy item -- the only case accepting fewer than
         // `slots` items, so it must be checked before the slot-count rule below.
-        if (inputs.size() == 1) {
-            RecycleInput only = inputs.get(0);
-            if (only.isAlloy()) {
-                return new RecycleResult.Remelt(only.alloyId(), settings.yieldRemeltAlloy());
+        // Relaxed from "exactly one alloy" so a four-piece alloy armour set remelts the
+        // obvious way; previously anything past the first alloy fell through to rule 4
+        // and was rejected as "non-metal input", which was actively misleading.
+        //
+        // Safe only downstream of rule 1: "every input is an alloy" is vacuously true of
+        // an empty list, and the ingot count below reads the first element.
+        if (inputs.stream().allMatch(RecycleInput::isAlloy)) {
+            Set<String> alloyIds = inputs.stream()
+                    .map(RecycleInput::alloyId)
+                    .collect(Collectors.toSet());
+            if (alloyIds.size() > 1) {
+                return new RecycleResult.Rejected("mixed alloys");
             }
+            // One ingot batch per item melted, at the configured per-item yield.
+            return new RecycleResult.Remelt(
+                    inputs.get(0).alloyId(), inputs.size() * settings.yieldRemeltAlloy());
         }
 
         // Rule 3: fewer than `slots` items, regardless of composition, is rejected.
@@ -98,8 +111,8 @@ public final class RecycleResolver {
             return new RecycleResult.Rejected("needs " + settings.slots() + " items");
         }
 
-        // Rule 4: every input must be either a metal or a modifier. An alloy item
-        // that is not alone (rule 2 already returned for the sole-alloy case), or any
+        // Rule 4: every input must be either a metal or a modifier. An alloy item mixed
+        // in with non-alloys (rule 2 already returned for the all-alloy case), or any
         // genuinely unrecognized item, trips this rule.
         boolean hasNonMetalNonModifier = inputs.stream()
                 .anyMatch(input -> input.metal() == null && !input.isModifier());

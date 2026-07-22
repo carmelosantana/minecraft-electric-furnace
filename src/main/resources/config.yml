@@ -57,8 +57,9 @@ recycling:
   # Alloy ingots yielded for a mixed-metal input -- whether it matches a named
   # recipe below or falls back to the generic Fused Alloy. Valid range: 0-64.
   yield-mixed-alloy: 2
-  # Ingots yielded when remelting a single alloy item. This is the only recipe
-  # that accepts fewer than `slots` items. Valid range: 0-64.
+  # Ingots yielded per alloy item remelted -- an all-alloy input of N items sharing
+  # one alloy id yields N times this. This is the only recipe that accepts fewer
+  # than `slots` items. Valid range: 0-64.
   yield-remelt-alloy: 1
   # Whether damaged (partially worn) gear is accepted at full yield. Durability is
   # never scaled into the yield -- giving worn-out gear a worthwhile destination
