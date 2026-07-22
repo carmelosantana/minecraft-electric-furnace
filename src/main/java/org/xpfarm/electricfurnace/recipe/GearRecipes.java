@@ -54,9 +54,13 @@ import java.util.function.Supplier;
  * Real crafting still works -- Geyser synthesizes a one-off recipe from the actual
  * grid contents once the Java server produces a result -- but a Bedrock player can lay
  * out <em>vanilla</em> netherite ingots in one of these shapes and see a phantom
- * output. {@link #onPrepareCraft} is what makes that phantom fail safe: it blanks the
- * result unless the grid genuinely holds stamped ingots, so the worst case is that
- * nothing happens, never a free item.
+ * output. That phantom fails safe on the server side without any help from this class:
+ * {@code ExactChoice} matches on the whole data-component map, so the Java server
+ * matches no recipe at all, produces no result, and has nothing to hand over when the
+ * client clicks. The phantom is a client-side rendering artifact, not a live craft.
+ *
+ * <p>{@link #onPrepareCraft} therefore guards two different things, neither of them
+ * that phantom -- see its own javadoc.
  *
  * <p>Registration always removes the key first, like {@link MachineRecipe}, because
  * {@code Bukkit.addRecipe} throws on a duplicate {@link NamespacedKey} and recipes
@@ -170,33 +174,71 @@ public final class GearRecipes implements Listener {
     }
 
     /**
-     * Blanks the craft result unless every ingot in the grid is a genuine alloy ingot.
+     * Guards the crafting grid in both directions, by blanking the result.
      *
-     * <p>A backstop, not the primary matcher: {@code ExactChoice} already rejects
-     * correctly on Java. This exists so the Bedrock false-positive path -- where the
-     * client matches a type-only recipe against vanilla netherite ingots -- cannot
-     * become an item duplication path. Blanking the result is the correct hook because
-     * it cannot consume ingredients, unlike cancelling later in the craft.
+     * <p>Blanking is the right hook for both arms because it cannot consume
+     * ingredients, unlike cancelling later in the craft. Nothing here can destroy an
+     * item; the worst it can do is decline to produce one.
      *
-     * <p>The key check comes first and is against {@link #registered}, so this handler
-     * can only ever blank a recipe this instance itself added -- never a vanilla recipe
-     * and never another plugin's.
+     * <p><b>One of ours ({@link #registered} holds the recipe key): every non-stick
+     * ingredient must be stamped.</b> A redundant backstop in practice --
+     * {@code ExactChoice} has already validated every ingredient by the time this runs,
+     * so the loop cannot currently fire. It is kept as a cheap invariant check that
+     * would catch a future ingredient switched away from {@code ExactChoice}.
+     *
+     * <p><b>Anyone else's recipe: no stamped ingredient may be consumed at all.</b>
+     * This is the arm that does real work, and it closes two live leaks:
+     *
+     * <ul>
+     *   <li><b>Laundering.</b> Alloy ingots are netherite ingots underneath, and
+     *       vanilla recipes match on item type while ignoring components. Nine alloy
+     *       ingots in a 3x3 make a real {@code minecraft:netherite_block}, which breaks
+     *       back down into nine <em>vanilla</em> netherite ingots. The same shape exists
+     *       for the smithing-template duplication recipe. At the shipped
+     *       {@code yield-mixed-alloy: 2} that is about five recycler runs for nine
+     *       netherite ingots -- worth more laundered than crafted into gear.</li>
+     *   <li><b>Identity loss.</b> Vanilla {@code minecraft:repair_item} takes two
+     *       damaged items of the same type and assembles a fresh {@code ItemStack}
+     *       carrying only merged enchantments. Two damaged Steel Swords would come back
+     *       as one plain iron sword: PDC, name, lore, derived attribute modifiers and
+     *       the raised max durability all silently gone, from an action a player
+     *       reasonably reads as maintenance. Anvil repair is unaffected -- it preserves
+     *       components and PDC -- so gear still has a repair path.</li>
+     * </ul>
+     *
+     * <p>The rule is blanket rather than a list of known-bad recipe keys, because the
+     * failure mode of an incomplete list is item laundering, while the failure mode of
+     * over-blanking is a craft that does not happen. No vanilla crafting-grid recipe
+     * legitimately consumes one of these items: every vanilla recipe reachable from an
+     * alloy ingot or a piece of alloy gear either launders it or strips its identity.
+     *
+     * <p>The stamp test is on the {@code xpfarm:custom_material} <b>value</b>, not on
+     * the key merely being present. That namespace is a shared cross-plugin contract, so
+     * a sibling plugin's stamped items must stay this handler's business to leave alone.
      */
     @EventHandler
     public void onPrepareCraft(PrepareItemCraftEvent event) {
-        if (!(event.getRecipe() instanceof Keyed keyed) || !registered.contains(keyed.getKey())) {
-            return;
-        }
+        boolean ourRecipe = event.getRecipe() instanceof Keyed keyed && registered.contains(keyed.getKey());
         for (ItemStack ingredient : event.getInventory().getMatrix()) {
-            if (ingredient == null || ingredient.getType() == Material.AIR
-                    || ingredient.getType() == Material.STICK) {
+            if (ingredient == null || ingredient.getType() == Material.AIR) {
                 continue;
             }
-            if (MaterialContract.readCustomMaterial(ingredient).isEmpty()) {
+            boolean stamped = isElectricFurnaceItem(ingredient);
+            boolean refuse = ourRecipe
+                    ? !stamped && ingredient.getType() != Material.STICK
+                    : stamped;
+            if (refuse) {
                 event.getInventory().setResult(null);
                 return;
             }
         }
+    }
+
+    /** Whether {@code stack} was minted by this plugin, by owning-system value rather than key presence. */
+    private static boolean isElectricFurnaceItem(ItemStack stack) {
+        return MaterialContract.readCustomMaterial(stack)
+                .filter(MaterialContract.OWNING_SYSTEM_ELECTRICFURNACE::equals)
+                .isPresent();
     }
 
     /**
