@@ -9,6 +9,8 @@
  */
 package org.xpfarm.electricfurnace.gear;
 
+import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
@@ -19,9 +21,20 @@ import java.util.Map;
  * Derives one gear piece's stats from an alloy's single stat block.
  *
  * <p><b>Entirely pure.</b> No {@code org.bukkit} type appears here or in its tests.
- * Every reference constant comes from {@code AlloyRegistry}, never re-declared.
+ * Durability reference values come from {@code AlloyRegistry} and armor-shape constants
+ * from {@link GearPiece}, never re-declared here; the vanilla armor base units below have
+ * no home elsewhere and are declared once, here.
  */
 public final class GearStatsDeriver {
+
+    /** Vanilla iron armor's durability base unit; pairs with {@code AlloyRegistry.IRON_MAX_DURABILITY}. */
+    public static final int IRON_ARMOR_BASE = 15;
+
+    /** Vanilla diamond armor's durability base unit. */
+    public static final int DIAMOND_ARMOR_BASE = 33;
+
+    /** Vanilla netherite armor's durability base unit; the ceiling for any derived value. */
+    public static final int NETHERITE_ARMOR_BASE = 37;
 
     private GearStatsDeriver() {
     }
@@ -68,5 +81,30 @@ public final class GearStatsDeriver {
             result.put(piece, result.get(piece) + 1);
         }
         return result;
+    }
+
+    /**
+     * Converts an alloy's tool-scale {@code maxDurability} into vanilla's armor
+     * durability base unit.
+     *
+     * <p>The two scales are deliberately <b>not</b> treated as proportional: vanilla
+     * iron is 250 tool durability against an armor base of 15 (a ratio of ~16.7),
+     * while diamond is 1561 against 33 (~47.3). Scaling by a flat ratio would badly
+     * overstate armor durability at the top of the range. Instead the alloy's
+     * <em>position</em> between the iron and diamond tool references is projected onto
+     * the interval between the iron and diamond armor bases, and rounded to nearest.
+     *
+     * <p>The result is clamped to {@code [IRON_ARMOR_BASE, NETHERITE_ARMOR_BASE]}.
+     * The upper clamp is reachable in normal use: {@code AlloyRegistry.clampStats}
+     * permits any value up to the netherite reference (2031), which projects to ~39.
+     *
+     * @param maxDurability the alloy's configured, already-clamped tool-scale durability
+     * @return the armor base unit to multiply by {@link GearPiece#durabilityFactor()}
+     */
+    public static int armorBaseUnit(int maxDurability) {
+        double span = AlloyRegistry.DIAMOND_MAX_DURABILITY - AlloyRegistry.IRON_MAX_DURABILITY;
+        double position = (maxDurability - AlloyRegistry.IRON_MAX_DURABILITY) / span;
+        long projected = Math.round(IRON_ARMOR_BASE + position * (DIAMOND_ARMOR_BASE - IRON_ARMOR_BASE));
+        return (int) Math.clamp(projected, IRON_ARMOR_BASE, NETHERITE_ARMOR_BASE);
     }
 }
