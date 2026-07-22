@@ -22,7 +22,9 @@ import org.jetbrains.annotations.NotNull;
 import org.xpfarm.electricfurnace.alloy.AlloyDefinition;
 import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
 import org.xpfarm.electricfurnace.config.EfConfig;
+import org.xpfarm.electricfurnace.gear.GearPiece;
 import org.xpfarm.electricfurnace.item.AlloyItemFactory;
+import org.xpfarm.electricfurnace.item.GearItemFactory;
 import org.xpfarm.electricfurnace.item.MachineItemFactory;
 
 import java.util.ArrayList;
@@ -107,8 +109,12 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
      * @param alloyId      the {@code alloy} id, lowercased, or {@code null}
      * @param amount       the resolved amount, always within {@link #MIN_AMOUNT}..{@link #MAX_AMOUNT}
      * @param error        the failure message, or {@code null} on success
+     * @param piece        the {@code alloy} gear piece to mint, or {@code null} to mint
+     *                     ingots -- {@code GearPiece} is this plugin's own Bukkit-free
+     *                     enum, so carrying it here keeps the parse layer headless
      */
-    public record ParseResult(Sub sub, String targetPlayer, String alloyId, int amount, String error) {
+    public record ParseResult(Sub sub, String targetPlayer, String alloyId, int amount, String error,
+            GearPiece piece) {
 
         /** Whether parsing succeeded. */
         public boolean ok() {
@@ -126,7 +132,7 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
         }
 
         static ParseResult failure(String message) {
-            return new ParseResult(null, null, null, 0, message);
+            return new ParseResult(null, null, null, 0, message, null);
         }
     }
 
@@ -155,7 +161,8 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
 
     /** The usage line shown for an empty or unrecognized invocation. */
     public static String usage() {
-        return "Usage: /electricfurnace <give [player] [amount] | alloy <id> [amount] | reload | info>";
+        return "Usage: /electricfurnace <give [player] [amount] | alloy <id> [piece] [amount] "
+                + "| reload | info>";
     }
 
     /** Parses a raw argument array into an invocation or an error. Never throws. */
@@ -185,28 +192,77 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
         if (amount.error() != null) {
             return ParseResult.failure(amount.error());
         }
-        return new ParseResult(Sub.GIVE, target, null, amount.value(), null);
+        return new ParseResult(Sub.GIVE, target, null, amount.value(), null, null);
     }
 
+    /**
+     * Parses {@code alloy <id> [piece] [amount]}.
+     *
+     * <p>The third token is genuinely ambiguous: in {@code alloy steel 5} it is an
+     * amount, in {@code alloy steel sword} it is a gear piece.
+     */
     private static ParseResult parseAlloy(String[] args) {
         if (args.length < 2) {
             return ParseResult.failure("Missing required argument <id>. " + usage());
         }
-        if (args.length > 3) {
+        String alloyId = args[1].toLowerCase(Locale.ROOT);
+
+        // Resolve the ambiguity by trying the piece first. No gear piece id is numeric,
+        // so this ordering cannot swallow an amount -- and a token that is neither a
+        // piece nor number-shaped is a typo worth naming rather than a silent ingot.
+        GearPiece piece = null;
+        int amountIndex = 2;
+        if (args.length > 2) {
+            Optional<GearPiece> parsed = GearPiece.byId(args[2]);
+            if (parsed.isPresent()) {
+                piece = parsed.get();
+                amountIndex = 3;
+            } else if (!isNumberShaped(args[2])) {
+                return ParseResult.failure("Unknown gear piece '" + args[2] + "'. " + usage());
+            }
+        }
+        // Same strictness as `give`: a surplus token is a typo, not something to drop.
+        if (args.length > amountIndex + 1) {
             return ParseResult.failure("Too many arguments. " + usage());
         }
-        AmountResult amount = parseAmount(args.length >= 3 ? args[2] : null);
+
+        AmountResult amount = parseAmount(args.length > amountIndex ? args[amountIndex] : null);
         if (amount.error() != null) {
             return ParseResult.failure(amount.error());
         }
-        return new ParseResult(Sub.ALLOY, null, args[1].toLowerCase(Locale.ROOT), amount.value(), null);
+        return new ParseResult(Sub.ALLOY, null, alloyId, amount.value(), null, piece);
+    }
+
+    /**
+     * Whether a token looks like it was meant as an amount, and so should be reported
+     * by {@link #parseAmount} rather than as an unknown gear piece.
+     *
+     * <p>Deliberately accepts a leading sign and does not range-check: {@code -4} is
+     * plainly an attempted amount, and "amount must be between 1 and 64" is a far more
+     * useful answer than "unknown gear piece '-4'", which would send an operator hunting
+     * for a typo in a word they never typed.
+     */
+    private static boolean isNumberShaped(String token) {
+        if (token == null || token.isEmpty()) {
+            return false;
+        }
+        int start = token.charAt(0) == '-' || token.charAt(0) == '+' ? 1 : 0;
+        if (start == token.length()) {
+            return false;
+        }
+        for (int i = start; i < token.length(); i++) {
+            if (!Character.isDigit(token.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static ParseResult parseNoArgs(Sub sub, String[] args) {
         if (args.length > 1) {
             return ParseResult.failure("'" + sub.token() + "' takes no arguments. " + usage());
         }
-        return new ParseResult(sub, null, null, 0, null);
+        return new ParseResult(sub, null, null, 0, null, null);
     }
 
     /** A parsed amount, or the reason it could not be parsed. */
@@ -283,6 +339,11 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
         if (args.length == 2 && sub == Sub.GIVE) {
             return null;
         }
+        if (args.length == 3 && sub == Sub.ALLOY) {
+            // The same ambiguous slot the parse resolves: offering the piece ids is the
+            // only way an operator discovers them, and a typed digit simply matches none.
+            return filterByPrefix(gearPieceIds(), args[2]);
+        }
         // amounts are free-form; everything else takes no arguments.
         return List.of();
     }
@@ -334,6 +395,15 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
             return "No player matches '" + typed + "'; no players are online.";
         }
         return "No player matches '" + typed + "'. Online: " + String.join(", ", onlineNames);
+    }
+
+    /** Every gear piece id, in {@link GearPiece} declaration order. */
+    private static List<String> gearPieceIds() {
+        List<String> ids = new ArrayList<>();
+        for (GearPiece piece : GearPiece.values()) {
+            ids.add(piece.id());
+        }
+        return ids;
     }
 
     private static List<String> filterByPrefix(List<String> candidates, String partial) {
@@ -416,16 +486,36 @@ public final class ElectricFurnaceCommand implements CommandExecutor, TabComplet
                     + "'. Try /electricfurnace info.").color(NamedTextColor.RED));
             return;
         }
+        GearPiece piece = parsed.piece();
+        ItemStack stack;
+        String what;
+        if (piece == null) {
+            stack = AlloyItemFactory.create(definition.get());
+            what = definition.get().displayName();
+        } else {
+            // Empty means this server has no such base item -- copper equipment only
+            // exists from 1.21.9. Say so rather than throwing or doing nothing visible.
+            Optional<ItemStack> gear = GearItemFactory.create(definition.get(), piece);
+            if (gear.isEmpty()) {
+                sender.sendMessage(Component.text("This server has no "
+                        + definition.get().base().id() + " " + piece.id() + ", so "
+                        + definition.get().displayName() + " " + piece.displayName()
+                        + " cannot be created here.").color(NamedTextColor.RED));
+                return;
+            }
+            stack = gear.get();
+            what = definition.get().displayName() + " " + piece.displayName();
+        }
+
         Optional<Player> target = resolveTarget(sender, null);
         if (target.isEmpty()) {
             return;
         }
-        ItemStack stack = AlloyItemFactory.create(definition.get());
         stack.setAmount(parsed.amount());
         giveOrDrop(target.get(), stack);
 
-        sender.sendMessage(Component.text("Gave " + parsed.amount() + " "
-                + definition.get().displayName() + ".").color(NamedTextColor.GREEN));
+        sender.sendMessage(Component.text("Gave " + parsed.amount() + " " + what + ".")
+                .color(NamedTextColor.GREEN));
     }
 
     private void handleReload(CommandSender sender) {

@@ -44,7 +44,7 @@ Alloys sit between iron and diamond in strength. Never above netherite.
 | Command | Permission |
 |---|---|
 | `/electricfurnace give [player] [amount]` | `electricfurnace.give` (op) |
-| `/electricfurnace alloy <id> [amount]` | `electricfurnace.give` (op) |
+| `/electricfurnace alloy <id> [piece] [amount]` | `electricfurnace.give` (op) |
 | `/electricfurnace reload` | `electricfurnace.reload` (op) |
 | `/electricfurnace info` | `electricfurnace.use` (default) |
 

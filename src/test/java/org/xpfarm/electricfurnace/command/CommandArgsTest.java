@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.xpfarm.electricfurnace.command.ElectricFurnaceCommand.ParseResult;
 import org.xpfarm.electricfurnace.command.ElectricFurnaceCommand.Sub;
+import org.xpfarm.electricfurnace.gear.GearPiece;
 
 import java.util.HashSet;
 import java.util.List;
@@ -217,6 +218,152 @@ class CommandArgsTest {
         }
     }
 
+    /**
+     * The optional {@code piece} argument: {@code /electricfurnace alloy <id> [piece] [amount]}.
+     *
+     * <p>The third token is genuinely ambiguous -- {@code alloy steel 5} means five
+     * ingots, {@code alloy steel sword} means one sword -- so both readings are pinned
+     * here, along with the token that is neither.
+     */
+    @Nested
+    @DisplayName("alloy piece argument")
+    class AlloyPiece {
+
+        @Test
+        void parseAlloy_withoutPiece_stillYieldsAnIngot() {
+            ParseResult result = ElectricFurnaceCommand.parse(new String[]{"alloy", "steel"});
+
+            assertTrue(result.ok(), result.error());
+            assertEquals(Sub.ALLOY, result.sub());
+            assertEquals("steel", result.alloyId());
+            assertNull(result.piece());
+        }
+
+        @Test
+        void parseAlloy_withPiece_resolvesThePiece() {
+            ParseResult result = ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "chestplate"});
+
+            assertTrue(result.ok(), result.error());
+            assertEquals("steel", result.alloyId());
+            assertEquals(GearPiece.CHESTPLATE, result.piece());
+        }
+
+        @Test
+        void parseAlloy_withPieceAndAmount_resolvesBoth() {
+            ParseResult result = ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "sword", "3"});
+
+            assertTrue(result.ok(), result.error());
+            assertEquals("steel", result.alloyId());
+            assertEquals(GearPiece.SWORD, result.piece());
+            assertEquals(3, result.amount());
+        }
+
+        @Test
+        void parseAlloy_amountInThePieceSlot_isStillAnAmount() {
+            // The ambiguous case: "alloy steel 5" must mean five ingots, not a piece.
+            ParseResult result = ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "5"});
+
+            assertTrue(result.ok(), result.error());
+            assertEquals("steel", result.alloyId());
+            assertNull(result.piece());
+            assertEquals(5, result.amount());
+        }
+
+        @Test
+        void parseAlloy_unknownPiece_isAnError() {
+            ParseResult result = ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "trousers"});
+
+            assertFalse(result.ok());
+            assertNotNull(result.error());
+            assertTrue(result.error().contains("trousers"),
+                    "the error should name the offending token: " + result.error());
+            // Diagnosed as a piece typo, not as a bad number: a word in this slot was
+            // plainly meant as a piece, and "'trousers' is not a number" would describe
+            // the wrong argument entirely.
+            assertTrue(result.error().toLowerCase(java.util.Locale.ROOT).contains("piece"),
+                    "the error should say what kind of token was wrong: " + result.error());
+        }
+
+        @Test
+        @DisplayName("a piece with no amount still defaults to one, exactly as an id alone does")
+        void pieceWithoutAmountDefaultsToOne() {
+            // The amount index moves when a piece is consumed; if it moved wrongly the
+            // default would silently differ between "alloy steel" and "alloy steel sword".
+            assertEquals(1, ElectricFurnaceCommand.parse(new String[]{"alloy", "steel"}).amount());
+            assertEquals(1, ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "sword"}).amount());
+        }
+
+        @Test
+        @DisplayName("every gear piece id is accepted, not just the two the tests name")
+        void everyPieceIdResolves() {
+            for (GearPiece piece : GearPiece.values()) {
+                ParseResult result =
+                        ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", piece.id()});
+                assertTrue(result.ok(), piece.id() + ": " + result.error());
+                assertEquals(piece, result.piece(), "wrong piece for token " + piece.id());
+                assertEquals(1, result.amount(), "amount default broke for " + piece.id());
+            }
+        }
+
+        @Test
+        @DisplayName("piece ids are case-insensitive, like alloy ids and subcommands")
+        void pieceIdIsCaseInsensitive() {
+            assertEquals(GearPiece.SWORD,
+                    ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "SWORD"}).piece());
+            assertEquals(GearPiece.CHESTPLATE,
+                    ElectricFurnaceCommand.parse(new String[]{"alloy", "STEEL", "ChestPlate"}).piece());
+        }
+
+        @Test
+        @DisplayName("a bad amount after a piece fails the same way as one without a piece")
+        void badAmountAfterAPieceIsRejected() {
+            assertFalse(ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "sword", "0"}).ok());
+            assertFalse(ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "sword", "65"}).ok());
+            assertFalse(ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "sword", "x"}).ok());
+        }
+
+        @Test
+        @DisplayName("an out-of-range amount in the piece slot reports the range, not 'unknown piece'")
+        void negativeAmountInThePieceSlotIsReportedAsAnAmount() {
+            // "-4" is not a piece id, but calling it an unknown gear piece would send an
+            // operator hunting for a typo in a word they never typed.
+            String error = ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "-4"}).error();
+            assertNotNull(error);
+            assertTrue(error.contains("1") && error.contains("64"),
+                    "should name the amount bounds: " + error);
+        }
+
+        @Test
+        @DisplayName("surplus arguments are rejected here too, with or without a piece")
+        void surplusArgumentsAreRejected() {
+            assertFalse(ElectricFurnaceCommand.parse(
+                    new String[]{"alloy", "steel", "sword", "3", "stacks"}).ok());
+            assertFalse(ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "5", "3"}).ok());
+        }
+
+        @Test
+        @DisplayName("no other invocation carries a piece")
+        void everyOtherInvocationHasANullPiece() {
+            assertNull(ElectricFurnaceCommand.parse(new String[]{"give", "Notch", "4"}).piece());
+            assertNull(ElectricFurnaceCommand.parse(new String[]{"reload"}).piece());
+            assertNull(ElectricFurnaceCommand.parse(new String[]{"info"}).piece());
+            assertNull(ElectricFurnaceCommand.parse(new String[]{"bogus"}).piece());
+        }
+
+        @Test
+        @DisplayName("issuing a piece needs no permission beyond the one alloy already required")
+        void pieceRequiresNoNewPermission() {
+            assertEquals("electricfurnace.give",
+                    ElectricFurnaceCommand.parse(new String[]{"alloy", "steel", "sword"}).permission());
+        }
+
+        @Test
+        @DisplayName("the usage line advertises the optional piece")
+        void usageMentionsThePiece() {
+            assertTrue(ElectricFurnaceCommand.usage().contains("[piece]"), ElectricFurnaceCommand.usage());
+        }
+    }
+
     @Nested
     @DisplayName("reload and info")
     class NoArgSubcommands {
@@ -275,6 +422,36 @@ class CommandArgsTest {
         void alloySecondArgumentFiltersByPrefix() {
             assertEquals(List.of("steel"), ElectricFurnaceCommand.complete(
                     new String[]{"alloy", "st"}, List.of("steel", "rose_gold"), ALL_PERMISSIONS));
+        }
+
+        @Test
+        @DisplayName("alloy's third argument offers every gear piece id")
+        void alloyThirdArgumentOffersGearPieceIds() {
+            List<String> completions = ElectricFurnaceCommand.complete(
+                    new String[]{"alloy", "steel", ""}, List.of("steel", "rose_gold"), ALL_PERMISSIONS);
+            for (GearPiece piece : GearPiece.values()) {
+                assertTrue(completions.contains(piece.id()), "missing completion for " + piece.id());
+            }
+        }
+
+        @Test
+        @DisplayName("alloy's third argument filters piece ids by prefix")
+        void alloyThirdArgumentFiltersByPrefix() {
+            assertEquals(List.of("chestplate"), ElectricFurnaceCommand.complete(
+                    new String[]{"alloy", "steel", "ch"}, List.of("steel"), ALL_PERMISSIONS));
+            assertEquals(List.of("sword"), ElectricFurnaceCommand.complete(
+                    new String[]{"alloy", "steel", "SW"}, List.of("steel"), ALL_PERMISSIONS));
+        }
+
+        @Test
+        @DisplayName("only alloy offers piece ids, and only in the third argument")
+        void pieceIdsAreNotOfferedElsewhere() {
+            assertTrue(ElectricFurnaceCommand.complete(
+                    new String[]{"alloy", "steel", "sword", ""}, List.of("steel"), ALL_PERMISSIONS).isEmpty(),
+                    "the amount argument is free-form");
+            assertTrue(ElectricFurnaceCommand.complete(
+                    new String[]{"give", "Notch", ""}, List.of("steel"), ALL_PERMISSIONS).isEmpty(),
+                    "give's amount argument is free-form");
         }
 
         @Test
