@@ -180,8 +180,17 @@ public final class GearRecipes implements Listener {
      * ingredients, unlike cancelling later in the craft. Nothing here can destroy an
      * item; the worst it can do is decline to produce one.
      *
-     * <p><b>One of ours ({@link #registered} holds the recipe key): every non-stick
-     * ingredient must be stamped.</b> A redundant backstop in practice --
+     * <p><b>One of ours ({@link #registered} holds the recipe key): the crafter must
+     * hold {@link MachineRecipe#CRAFT_PERMISSION}.</b> The spec gates all crafting on
+     * that node and {@link MachineRecipe} already enforced it for the machine item, so
+     * an operator revoking it to stop a player crafting would otherwise have found all
+     * 30 gear recipes still working. The check is against
+     * {@link org.bukkit.inventory.InventoryView#getPlayer()} -- the crafter -- for the
+     * same reason {@link MachineRecipe} uses it: a crafting inventory's viewer list can
+     * be empty, and an {@code allMatch} over no viewers permits the craft for everyone.
+     *
+     * <p><b>One of ours: every non-stick ingredient must be stamped.</b> A redundant
+     * backstop in practice --
      * {@code ExactChoice} has already validated every ingredient by the time this runs,
      * so the loop cannot currently fire. It is kept as a cheap invariant check that
      * would catch a future ingredient switched away from {@code ExactChoice}.
@@ -219,6 +228,10 @@ public final class GearRecipes implements Listener {
     @EventHandler
     public void onPrepareCraft(PrepareItemCraftEvent event) {
         boolean ourRecipe = event.getRecipe() instanceof Keyed keyed && registered.contains(keyed.getKey());
+        if (ourRecipe && !event.getView().getPlayer().hasPermission(MachineRecipe.CRAFT_PERMISSION)) {
+            event.getInventory().setResult(null);
+            return;
+        }
         for (ItemStack ingredient : event.getInventory().getMatrix()) {
             if (ingredient == null || ingredient.getType() == Material.AIR) {
                 continue;

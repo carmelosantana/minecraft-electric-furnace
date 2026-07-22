@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.xpfarm.electricfurnace.gear.GearBase;
+import org.xpfarm.electricfurnace.recipe.MachineRecipe;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -135,5 +136,32 @@ final class PluginDescriptorTest {
         assertTrue(permissions.containsKey("electricfurnace.give"), "electricfurnace.give must be declared");
         assertTrue(permissions.containsKey("electricfurnace.reload"), "electricfurnace.reload must be declared");
         assertTrue(permissions.containsKey("electricfurnace.use"), "electricfurnace.use must be declared");
+    }
+
+    /**
+     * Binds the node the code actually checks to the node the descriptor actually
+     * declares.
+     *
+     * <p>The test above hardcodes the four strings, so it stays green if the constant
+     * drifts. Both {@link MachineRecipe#onPrepareCraft} and
+     * {@link org.xpfarm.electricfurnace.recipe.GearRecipes#onPrepareCraft} gate on
+     * {@link MachineRecipe#CRAFT_PERMISSION}, and an undeclared node has no default, so
+     * a typo there silently denies every craft to every non-op instead of the
+     * {@code default: true} the spec calls for.
+     */
+    @Test
+    void theCraftPermissionTheRecipeHandlersEnforceIsTheOnePluginYmlDeclares() throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> permissions = (Map<String, Object>) parse(PLUGIN_YML).get("permissions");
+        assertNotNull(permissions, "permissions section is required");
+
+        assertTrue(permissions.containsKey(MachineRecipe.CRAFT_PERMISSION),
+                "the recipe handlers enforce '" + MachineRecipe.CRAFT_PERMISSION
+                        + "', which plugin.yml does not declare");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> craft = (Map<String, Object>) permissions.get(MachineRecipe.CRAFT_PERMISSION);
+        assertEquals(true, craft.get("default"),
+                "the craft permission must default to true -- it gates crafting for everyone");
     }
 }

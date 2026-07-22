@@ -17,7 +17,7 @@ permissions:
     description: Open and use an Electric Furnace
     default: true
   electricfurnace.craft:
-    description: Craft the Electric Furnace item
+    description: Craft the Electric Furnace item and alloy gear
     default: true
   electricfurnace.give:
     description: Issue Electric Furnace items and alloy ingots
