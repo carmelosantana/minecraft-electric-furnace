@@ -12,6 +12,7 @@ package org.xpfarm.electricfurnace.alloy;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
+import org.xpfarm.electricfurnace.gear.GearBase;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
@@ -43,7 +44,7 @@ class AlloyRegistryTest {
     @Test
     void findNamedMatch_isOrderIndependent() {
         AlloyDefinition steel = new AlloyDefinition("steel", "Steel", List.of(), "#71797E",
-                Set.of("iron", "coal"), BASELINE_STATS);
+                Set.of("iron", "coal"), BASELINE_STATS, GearBase.IRON);
         AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(steel, fallback()), this::warn);
 
         // Set.of(...) is unordered by construction, but build it two different ways to
@@ -60,7 +61,7 @@ class AlloyRegistryTest {
     @Test
     void findNamedMatch_noMatch_returnsEmpty() {
         AlloyDefinition steel = new AlloyDefinition("steel", "Steel", List.of(), "#71797E",
-                Set.of("iron", "coal"), BASELINE_STATS);
+                Set.of("iron", "coal"), BASELINE_STATS, GearBase.IRON);
         AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(steel, fallback()), this::warn);
 
         Optional<AlloyDefinition> match = registry.findNamedMatch(Set.of("gold", "copper"));
@@ -73,7 +74,7 @@ class AlloyRegistryTest {
     @Test
     void unknownMix_fallsBackToFusedAlloy() {
         AlloyDefinition steel = new AlloyDefinition("steel", "Steel", List.of(), "#71797E",
-                Set.of("iron", "coal"), BASELINE_STATS);
+                Set.of("iron", "coal"), BASELINE_STATS, GearBase.IRON);
         AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(steel, fallback()), this::warn);
 
         assertEquals("fused_alloy", registry.fallback().id());
@@ -83,7 +84,7 @@ class AlloyRegistryTest {
     @Test
     void missingFallbackInConfig_synthesizesDefaultAndWarns() {
         AlloyDefinition steel = new AlloyDefinition("steel", "Steel", List.of(), "#71797E",
-                Set.of("iron", "coal"), BASELINE_STATS);
+                Set.of("iron", "coal"), BASELINE_STATS, GearBase.IRON);
         AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(steel), this::warn);
 
         assertEquals("fused_alloy", registry.fallback().id());
@@ -97,7 +98,7 @@ class AlloyRegistryTest {
         AlloyStats overpowered = new AlloyStats(
                 AlloyRegistry.NETHERITE_ATTACK_DAMAGE + 1.0, -2.6, 16, 1.0, 700, 12);
         AlloyDefinition busted = new AlloyDefinition("busted", "Busted Alloy", List.of(), "#000000",
-                Set.of("iron", "gold"), overpowered);
+                Set.of("iron", "gold"), overpowered, GearBase.IRON);
 
         AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(busted, fallback()), this::warn);
 
@@ -115,7 +116,7 @@ class AlloyRegistryTest {
         AlloyStats atCeiling = new AlloyStats(
                 AlloyRegistry.NETHERITE_ATTACK_DAMAGE, -2.6, 16, 1.0, 700, 12);
         AlloyDefinition fine = new AlloyDefinition("fine", "Fine Alloy", List.of(), "#000000",
-                Set.of("iron", "gold"), atCeiling);
+                Set.of("iron", "gold"), atCeiling, GearBase.IRON);
 
         AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(fine, fallback()), this::warn);
 
@@ -133,7 +134,7 @@ class AlloyRegistryTest {
                 AlloyRegistry.NETHERITE_MAX_DURABILITY + 500,
                 12);
         AlloyDefinition busted = new AlloyDefinition("busted", "Busted Alloy", List.of(), "#000000",
-                Set.of("iron", "gold"), overpowered);
+                Set.of("iron", "gold"), overpowered, GearBase.IRON);
 
         AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(busted, fallback()), this::warn);
 
@@ -145,7 +146,8 @@ class AlloyRegistryTest {
     }
 
     private static AlloyDefinition fallback() {
-        return new AlloyDefinition("fused_alloy", "Fused Alloy", List.of(), "#4B4B4B", Set.of(), BASELINE_STATS);
+        return new AlloyDefinition("fused_alloy", "Fused Alloy", List.of(), "#4B4B4B", Set.of(),
+                BASELINE_STATS, GearBase.IRON);
     }
 
     // ---- M4: one malformed alloy entry must not take down the whole load ------------
@@ -211,5 +213,147 @@ class AlloyRegistryTest {
         };
         return (ConfigurationSection) Proxy.newProxyInstance(
                 ConfigurationSection.class.getClassLoader(), new Class<?>[]{ConfigurationSection.class}, handler);
+    }
+
+    // ---- Task 6: alloys.<id>.base ---------------------------------------------------
+
+    @Test
+    void load_absentBaseKey_usesTheThematicDefaultForThatAlloy() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("steel.display-name", "Steel");
+        yaml.set("steel.color", "#71797E");
+        yaml.set("steel.inputs", List.of("iron", "coal"));
+        yaml.set("steel.stats.attack-damage", 6.5);
+        yaml.set("steel.stats.attack-speed", -2.6);
+        yaml.set("steel.stats.armor", 16);
+        yaml.set("steel.stats.armor-toughness", 1.0);
+        yaml.set("steel.stats.max-durability", 700);
+        yaml.set("steel.stats.enchantability", 12);
+
+        AlloyRegistry registry = AlloyRegistry.load(yaml.getConfigurationSection(""), this::warn);
+
+        assertEquals(GearBase.IRON, baseOf(registry, "steel"));
+    }
+
+    /**
+     * {@code AlloyRegistry} exposes {@code all()} (a {@code Collection}), not a
+     * by-id lookup. Find the definition through it rather than widening the registry's
+     * API for a test's convenience.
+     */
+    private static GearBase baseOf(AlloyRegistry registry, String alloyId) {
+        return registry.all().stream()
+                .filter(definition -> definition.id().equals(alloyId))
+                .findFirst()
+                .orElseThrow()
+                .base();
+    }
+
+    @Test
+    void load_explicitBaseKey_overridesTheDefault() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("steel.display-name", "Steel");
+        yaml.set("steel.color", "#71797E");
+        yaml.set("steel.base", "diamond");
+        yaml.set("steel.inputs", List.of("iron", "coal"));
+        yaml.set("steel.stats.attack-damage", 6.5);
+        yaml.set("steel.stats.attack-speed", -2.6);
+        yaml.set("steel.stats.armor", 16);
+        yaml.set("steel.stats.armor-toughness", 1.0);
+        yaml.set("steel.stats.max-durability", 700);
+        yaml.set("steel.stats.enchantability", 12);
+
+        AlloyRegistry registry = AlloyRegistry.load(yaml.getConfigurationSection(""), this::warn);
+
+        assertEquals(GearBase.DIAMOND, baseOf(registry, "steel"));
+    }
+
+    @Test
+    void load_unknownBaseKey_warnsAndFallsBackToTheDefault() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("steel.display-name", "Steel");
+        yaml.set("steel.color", "#71797E");
+        yaml.set("steel.base", "mithril");
+        yaml.set("steel.inputs", List.of("iron", "coal"));
+        yaml.set("steel.stats.attack-damage", 6.5);
+        yaml.set("steel.stats.attack-speed", -2.6);
+        yaml.set("steel.stats.armor", 16);
+        yaml.set("steel.stats.armor-toughness", 1.0);
+        yaml.set("steel.stats.max-durability", 700);
+        yaml.set("steel.stats.enchantability", 12);
+
+        AlloyRegistry registry = AlloyRegistry.load(yaml.getConfigurationSection(""), this::warn);
+
+        assertEquals(GearBase.IRON, baseOf(registry, "steel"),
+                "an unusable base must degrade to the default, never disable the alloy");
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("steel") && w.contains("mithril")),
+                "the warning must name both the alloy and the offending value; warnings were: " + warnings);
+    }
+
+    /**
+     * The three tests above all use {@code steel}, whose thematic default happens to be
+     * {@code IRON} -- which is also {@code GearBase}'s catch-all fallback. They therefore
+     * cannot tell {@code defaultFor(id)} apart from a hardcoded {@code IRON}. These two
+     * use {@code rose_gold} (default {@code GOLD}) so that distinction is actually tested.
+     */
+    @Test
+    void load_absentBaseKey_usesTheAlloysOwnDefault_notTheGenericIronFallback() {
+        AlloyRegistry registry = AlloyRegistry.load(roseGoldSection(null), this::warn);
+
+        assertEquals(GearBase.GOLD, baseOf(registry, "rose_gold"),
+                "an absent base must resolve through GearBase.defaultFor(id), not to a blanket IRON");
+    }
+
+    @Test
+    void load_unknownBaseKey_fallsBackToTheAlloysOwnDefault_andNamesItInTheWarning() {
+        AlloyRegistry registry = AlloyRegistry.load(roseGoldSection("mithril"), this::warn);
+
+        assertEquals(GearBase.GOLD, baseOf(registry, "rose_gold"),
+                "an unknown base must degrade to this alloy's default, not to a blanket IRON");
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("rose_gold") && w.contains("mithril")
+                        && w.contains("'gold'")),
+                "the warning must name the alloy, the offending value, and the base fallen back to; "
+                        + "warnings were: " + warnings);
+    }
+
+    /** A one-alloy root section for {@code rose_gold}, with {@code base} set only if non-null. */
+    private static ConfigurationSection roseGoldSection(String base) {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("rose_gold.display-name", "Rose Gold");
+        yaml.set("rose_gold.color", "#B76E79");
+        if (base != null) {
+            yaml.set("rose_gold.base", base);
+        }
+        yaml.set("rose_gold.inputs", List.of("copper", "gold"));
+        yaml.set("rose_gold.stats.attack-damage", 6.2);
+        yaml.set("rose_gold.stats.attack-speed", -2.5);
+        yaml.set("rose_gold.stats.armor", 15);
+        yaml.set("rose_gold.stats.armor-toughness", 0.5);
+        yaml.set("rose_gold.stats.max-durability", 500);
+        yaml.set("rose_gold.stats.enchantability", 20);
+        return yaml.getConfigurationSection("");
+    }
+
+    @Test
+    void synthesizedFallback_usesTheThematicDefaultForItsOwnId() {
+        AlloyDefinition steel = new AlloyDefinition("steel", "Steel", List.of(), "#71797E",
+                Set.of("iron", "coal"), BASELINE_STATS, GearBase.IRON);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(steel), this::warn);
+
+        assertEquals(GearBase.NETHERITE, registry.fallback().base(),
+                "the synthesized fused_alloy must take GearBase.defaultFor(\"fused_alloy\")");
+    }
+
+    @Test
+    void fromDefinitions_preservesTheConfiguredBaseThroughClamping() {
+        AlloyStats overpowered = new AlloyStats(
+                AlloyRegistry.NETHERITE_ATTACK_DAMAGE + 1.0, -2.6, 16, 1.0, 700, 12);
+        AlloyDefinition busted = new AlloyDefinition("busted", "Busted Alloy", List.of(), "#000000",
+                Set.of("iron", "gold"), overpowered, GearBase.COPPER);
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(List.of(busted, fallback()), this::warn);
+
+        assertEquals(GearBase.COPPER, registry.get("busted").orElseThrow().base(),
+                "rebuilding the definition around the clamped stats must carry the base across");
     }
 }

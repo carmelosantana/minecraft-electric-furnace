@@ -10,6 +10,7 @@
 package org.xpfarm.electricfurnace.alloy;
 
 import org.bukkit.configuration.ConfigurationSection;
+import org.xpfarm.electricfurnace.gear.GearBase;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -82,7 +83,7 @@ public final class AlloyRegistry {
         for (AlloyDefinition def : rawDefinitions) {
             AlloyDefinition safe = new AlloyDefinition(
                     def.id(), def.displayName(), def.lore(), def.color(), def.inputIds(),
-                    clampStats(def.id(), def.stats(), warn));
+                    clampStats(def.id(), def.stats(), warn), def.base());
             clamped.put(safe.id(), safe);
             if (safe.isFallback() && fallbackId == null) {
                 fallbackId = safe.id();
@@ -95,7 +96,8 @@ public final class AlloyRegistry {
             AlloyDefinition synthesized = new AlloyDefinition(
                     SYNTHESIZED_FALLBACK_ID, "Fused Alloy", List.of(), "#4B4B4B", Set.of(),
                     new AlloyStats(IRON_ATTACK_DAMAGE, -2.6, IRON_ARMOR, IRON_ARMOR_TOUGHNESS,
-                            IRON_MAX_DURABILITY, 10));
+                            IRON_MAX_DURABILITY, 10),
+                    GearBase.defaultFor(SYNTHESIZED_FALLBACK_ID));
             clamped.put(synthesized.id(), synthesized);
             fallbackId = synthesized.id();
         }
@@ -107,8 +109,9 @@ public final class AlloyRegistry {
      * Parses the {@code alloys:} section of {@code config.yml} and delegates to
      * {@link #fromDefinitions}. Each child section is read as one alloy: {@code
      * display-name} (string), {@code lore} (string list, optional), {@code color}
-     * (string, optional), {@code inputs} (string list, may be empty to mark the
-     * fallback), and {@code stats.*} (the six {@link AlloyStats} fields).
+     * (string, optional), {@code base} (a {@link GearBase} token, optional -- defaults
+     * to {@link GearBase#defaultFor(String)}), {@code inputs} (string list, may be empty
+     * to mark the fallback), and {@code stats.*} (the six {@link AlloyStats} fields).
      *
      * <p>A missing or malformed alloy entry is skipped with a warning naming the
      * offending alloy id, rather than thrown out of the whole method -- consistent
@@ -130,7 +133,7 @@ public final class AlloyRegistry {
                     continue;
                 }
                 try {
-                    definitions.add(parseDefinition(id, section));
+                    definitions.add(parseDefinition(id, section, warn));
                 } catch (RuntimeException e) {
                     // A single malformed entry (e.g. a stats value the section
                     // implementation refuses to coerce) must cost only this alloy, not
@@ -144,11 +147,12 @@ public final class AlloyRegistry {
         return fromDefinitions(definitions, warn);
     }
 
-    private static AlloyDefinition parseDefinition(String id, ConfigurationSection section) {
+    private static AlloyDefinition parseDefinition(String id, ConfigurationSection section, Consumer<String> warn) {
         String displayName = section.getString("display-name", id);
         List<String> lore = section.getStringList("lore");
         String color = section.getString("color", "#FFFFFF");
         Set<String> inputIds = Set.copyOf(section.getStringList("inputs"));
+        GearBase base = parseBase(id, section.getString("base"), warn);
 
         ConfigurationSection statsSection = section.getConfigurationSection("stats");
         AlloyStats stats = new AlloyStats(
@@ -160,7 +164,27 @@ public final class AlloyRegistry {
                 statsSection == null ? 10 : statsSection.getInt("enchantability", 10)
         );
 
-        return new AlloyDefinition(id, displayName, lore, color, inputIds, stats);
+        return new AlloyDefinition(id, displayName, lore, color, inputIds, stats, base);
+    }
+
+    /**
+     * Resolves {@code alloys.<id>.base} to a {@link GearBase}. An absent key takes the
+     * alloy's thematic default; an unrecognized one warns and takes that same default.
+     * A bad base never disables the alloy -- consistent with this plugin's config
+     * contract that no configuration mistake stops the plugin from starting.
+     */
+    private static GearBase parseBase(String id, String rawBase, Consumer<String> warn) {
+        if (rawBase == null) {
+            return GearBase.defaultFor(id);
+        }
+        Optional<GearBase> parsed = GearBase.byId(rawBase);
+        if (parsed.isPresent()) {
+            return parsed.get();
+        }
+        GearBase fallback = GearBase.defaultFor(id);
+        warn.accept("ElectricFurnace alloys: alloy '" + id + "' has an unrecognized base '" + rawBase
+                + "'; falling back to '" + fallback.id() + "'.");
+        return fallback;
     }
 
     /** Looks up a definition by id. */

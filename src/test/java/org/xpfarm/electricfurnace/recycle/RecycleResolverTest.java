@@ -15,6 +15,7 @@ import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
 import org.xpfarm.electricfurnace.alloy.AlloyStats;
 import org.xpfarm.electricfurnace.alloy.MetalType;
 import org.xpfarm.electricfurnace.config.RecyclingSettings;
+import org.xpfarm.electricfurnace.gear.GearBase;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -309,15 +310,15 @@ class RecycleResolverTest {
         AlloyStats basicStats = new AlloyStats(6.5, -2.6, 16, 1.0, 700, 12);
         List<AlloyDefinition> definitions = List.of(
                 new AlloyDefinition("steel", "Steel", List.of("A carbon-hardened iron alloy."),
-                        "#71797E", Set.of("iron", "coal"), basicStats),
+                        "#71797E", Set.of("iron", "coal"), basicStats, GearBase.IRON),
                 new AlloyDefinition("rose_gold", "Rose Gold", List.of("A warm copper-gold blend."),
-                        "#B76E79", Set.of("copper", "gold"), basicStats),
+                        "#B76E79", Set.of("copper", "gold"), basicStats, GearBase.GOLD),
                 new AlloyDefinition("ferrocopper", "Ferrocopper", List.of("Copper toughened with iron."),
-                        "#B87333", Set.of("copper", "iron"), basicStats),
+                        "#B87333", Set.of("copper", "iron"), basicStats, GearBase.COPPER),
                 new AlloyDefinition("electrum_steel", "Electrum Steel", List.of("Gold-veined structural steel."),
-                        "#D4C9A8", Set.of("gold", "iron"), basicStats),
+                        "#D4C9A8", Set.of("gold", "iron"), basicStats, GearBase.DIAMOND),
                 new AlloyDefinition("fused_alloy", "Fused Alloy", List.of("An unrefined fusion of leftover metals."),
-                        "#4B4B4B", Set.of(), basicStats)
+                        "#4B4B4B", Set.of(), basicStats, GearBase.NETHERITE)
         );
         return AlloyRegistry.fromDefinitions(definitions, warnings::add);
     }
