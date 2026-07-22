@@ -59,7 +59,13 @@ recycling:
   yield-mixed-alloy: 2
   # Ingots yielded per alloy item remelted -- an all-alloy input of N items sharing
   # one alloy id yields N times this. This is the only recipe that accepts fewer
-  # than `slots` items. Valid range: 0-64.
+  # than `slots` items.
+  #
+  # Valid range: 0 to (64 / slots), because it is also the only yield that
+  # multiplies by the input count. At the default 5 slots the ceiling is 12: a
+  # higher value would make a full batch exceed one 64-item stack, which the output
+  # slot cannot hold, leaving the machine permanently blocked. A value past the
+  # ceiling is refused at startup with a warning naming both keys.
   yield-remelt-alloy: 1
   # Whether damaged (partially worn) gear is accepted at full yield. Durability is
   # never scaled into the yield -- giving worn-out gear a worthwhile destination

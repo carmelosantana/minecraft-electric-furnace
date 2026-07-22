@@ -70,15 +70,23 @@ public record EfConfig(MachineSettings machine, EffectSettings effects, Recyclin
                 resolveSound(get(root, "effects.sound"), warn)
         );
 
+        // Read out of line, unlike every other key here, because it is the one value this
+        // method needs twice: `yield-remelt-alloy` is capped against it (see
+        // ConfigValidator#remeltYieldCeiling). It must be the *validated* count -- an
+        // out-of-range `slots` falls back to 5, and the yield is judged against 5.
+        int slots = ConfigValidator.parseInt("recycling.slots",
+                get(root, "recycling.slots"), 1, 9, 5, warn);
+
         RecyclingSettings recycling = new RecyclingSettings(
-                ConfigValidator.parseInt("recycling.slots",
-                        get(root, "recycling.slots"), 1, 9, 5, warn),
+                slots,
+                // Flat per operation, so no input count multiplies them and a full stack
+                // is a safe upper bound.
                 ConfigValidator.parseInt("recycling.yield-same-metal",
                         get(root, "recycling.yield-same-metal"), 0, 64, 3, warn),
                 ConfigValidator.parseInt("recycling.yield-mixed-alloy",
                         get(root, "recycling.yield-mixed-alloy"), 0, 64, 2, warn),
-                ConfigValidator.parseInt("recycling.yield-remelt-alloy",
-                        get(root, "recycling.yield-remelt-alloy"), 0, 64, 1, warn),
+                ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy",
+                        get(root, "recycling.yield-remelt-alloy"), slots, 1, warn),
                 ConfigValidator.parseBoolean("recycling.accept-damaged",
                         get(root, "recycling.accept-damaged"), true, warn)
         );
