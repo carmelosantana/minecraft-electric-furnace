@@ -941,6 +941,22 @@ log line. Stack torn down with `matrix down`; lease released, no orphaned contai
 
 ## 8. CI/CD
 
+### `0.3.1` — main-branch run recorded before tagging (2026-07-22)
+
+- [x] Successful main Actions run is recorded before tagging.
+  - Run [29952192473](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29952192473),
+    `Build and release`, branch `main`, commit `2178bed` (`Bump version to 0.3.1`)
+    → **completed / success**. This is the exact SHA `v0.3.1` tags; the tag was created
+    only after the run resolved to a completed success, never while in flight.
+  - The preceding commit `8718d3c` (the `api-version` raise itself) also had its own
+    green main run,
+    [29945941742](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29945941742)
+    → completed / success, so both commits in this release are independently validated.
+  - Warnings unchanged: only the two pre-existing
+    `InventoryAction.HOTBAR_MOVE_AND_READD` deprecations in
+    `MachineGuiListenerTest.java:70,246`, matching the local build exactly. No new
+    warnings.
+
 ### `0.3.0` — main-branch run recorded before tagging (2026-07-22)
 
 - [x] Successful main Actions run is recorded before tagging.
@@ -993,6 +1009,46 @@ pass can produce.
   - `permissions: contents: write` only. No `packages:`, `id-token:`, or other scopes.
 
 ## 9. Release
+
+### `0.3.1` — RELEASED and verified (2026-07-22) — current
+
+<https://github.com/carmelosantana/minecraft-electric-furnace/releases/tag/v0.3.1>
+
+Patch release carrying one change: `api-version` `'1.21'` → `'26.1'`. No behaviour
+change, no config change, no API surface added or removed — the only shipped difference
+is which bytecode Paper loads, which is why this is a patch and not a minor.
+
+- [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag.
+  - POM `<version>0.3.1</version>`; `plugin.yml` uses `version: '${project.version}'`
+    with no hardcoded drift; the embedded `plugin.yml` in the **downloaded published**
+    JAR reads `version: '0.3.1'` and `api-version: '26.1'`; annotated tag `v0.3.1` →
+    `2178bed`, the exact commit gate 8's green run validated.
+- [x] Tag run succeeded and the release exists.
+  - Run [29952251944](https://github.com/carmelosantana/minecraft-electric-furnace/actions/runs/29952251944),
+    branch `v0.3.1`, sha `2178bed` → **completed / success**.
+  - Release created by `github-actions[bot]`, published `2026-07-22T19:45:12Z`,
+    `draft: false`, `prerelease: false`.
+- [x] Asset contract satisfied — exactly one updater-matching JAR plus checksums.
+  - Assets are exactly `electric-furnace-0.3.1.jar` (155944 bytes) and
+    `SHA256SUMS.txt` (93 bytes). Verified by listing the *downloaded* release directory,
+    not just the API asset list.
+  - **No `original-*` JAR leaked.**
+- [x] `sha256sum --check` passes against the published assets.
+  - `sha256sum --check SHA256SUMS.txt` → `electric-furnace-0.3.1.jar: OK`, exit 0.
+    Manifest records the bare filename (`c93c18f7…  electric-furnace-0.3.1.jar`), so the
+    `v0.1.0` `target/`-prefix defect remains fixed.
+
+**Gate 10 requires no manifest change for this release.** The updater entry for this
+plugin carries `asset_regex: ^electric-furnace-[0-9].*\.jar$`, which matches
+`electric-furnace-0.3.1.jar`, with no `pin` and no `enabled: false`. It therefore picks
+up `0.3.1` on its next run with no edit. Confirmed by reading the live
+`minecraft-plugin-updater/plugins.json`, not assumed.
+
+**Released with client behaviour still unverified**, exactly as `0.3.0` was. The gate 7a
+run for the `api-version` raise proved the plugin loads, enables, reads its config and
+answers commands on the new bytecode path; it minted no gear item and fired no event. The
+full play-test obligation enumerated under §7 is unchanged and still owed on
+`play.xpfarm.org`.
 
 ### `0.3.0` — RELEASED and verified (2026-07-22)
 
