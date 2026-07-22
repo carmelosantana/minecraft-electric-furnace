@@ -27,7 +27,6 @@ import org.xpfarm.electricfurnace.gear.GearPiece;
 import org.xpfarm.electricfurnace.gear.GearStats;
 import org.xpfarm.electricfurnace.gear.GearStatsDeriver;
 
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -181,13 +180,5 @@ public final class GearItemFactory {
     private static TextColor parseColor(String hex) {
         TextColor color = TextColor.fromHexString(hex);
         return color != null ? color : TextColor.fromHexString("#FFFFFF");
-    }
-
-    /** Every piece of one alloy, skipping any whose base material this server lacks. */
-    public static List<ItemStack> createAll(AlloyDefinition definition) {
-        return java.util.Arrays.stream(GearPiece.values())
-                .map(piece -> create(definition, piece))
-                .flatMap(Optional::stream)
-                .toList();
     }
 }
