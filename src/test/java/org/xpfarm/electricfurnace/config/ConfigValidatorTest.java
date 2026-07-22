@@ -209,6 +209,118 @@ class ConfigValidatorTest {
         assertWarningNames(warnings.get(0), "machine.require-redstone-signal", "maybe", "true");
     }
 
+    // ---- parseRemeltYield ------------------------------------------------------------
+
+    /**
+     * The whole point of the slot-dependent ceiling: no validated pair of
+     * {@code recycling.slots} and {@code recycling.yield-remelt-alloy} may describe a
+     * full batch that cannot fit in one output stack. Asserts the invariant across
+     * every valid slot count rather than a hardcoded table, so the rule stays honest
+     * if the ceiling's arithmetic ever changes.
+     */
+    @Test
+    void remeltYieldCeiling_atEverySlotCount_keepsAFullBatchInsideOneStack() {
+        for (int slots = 1; slots <= 9; slots++) {
+            int ceiling = ConfigValidator.remeltYieldCeiling(slots);
+
+            int fullBatch = slots * ceiling;
+            int checkedSlots = slots;
+            assertTrue(fullBatch <= 64,
+                    () -> "slots=" + checkedSlots + " x yield=" + (fullBatch / checkedSlots)
+                            + " = " + fullBatch + " must not exceed one 64-item stack");
+            assertTrue(ceiling >= 1,
+                    () -> "slots=" + checkedSlots + " must still permit the default yield of 1");
+        }
+    }
+
+    @Test
+    void remeltYieldCeiling_atOneSlot_allowsAFullStack() {
+        assertEquals(64, ConfigValidator.remeltYieldCeiling(1));
+    }
+
+    @Test
+    void remeltYieldCeiling_atNineSlots_floorsRatherThanRoundingUp() {
+        // 9 x 7 = 63 fits; 9 x 8 = 72 would not.
+        assertEquals(7, ConfigValidator.remeltYieldCeiling(9));
+    }
+
+    /**
+     * {@code slots} is always validated to 1-9 before reaching here, but this class
+     * promises never to throw, and a bare {@code 64 / slots} would divide by zero.
+     */
+    @Test
+    void remeltYieldCeiling_atZeroSlots_doesNotThrow() {
+        assertEquals(64, ConfigValidator.remeltYieldCeiling(0));
+        assertEquals(64, ConfigValidator.remeltYieldCeiling(-3));
+    }
+
+    @Test
+    void parseRemeltYield_withinCeiling_passesThroughUnchanged() {
+        int result = ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy", 12, 5, 1, this::warn);
+
+        assertEquals(12, result);
+        assertTrue(warnings.isEmpty(), "a yield inside the ceiling must not warn");
+    }
+
+    @Test
+    void parseRemeltYield_aboveCeiling_fallsBackToTheDefault() {
+        // slots=5 caps the yield at 12; 13 would make a five-item batch 65 ingots.
+        int result = ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy", 13, 5, 1, this::warn);
+
+        assertEquals(1, result);
+        assertEquals(1, warnings.size());
+        assertWarningNames(warnings.get(0), "recycling.yield-remelt-alloy", "13", "1");
+    }
+
+    /**
+     * A bare "must be between 0 and 12" would leave the operator with no idea where 12
+     * came from. Naming {@code recycling.slots} in the warning is the diagnostic this
+     * ceiling exists to provide.
+     */
+    @Test
+    void parseRemeltYield_aboveCeiling_blamesTheSlotCountThatSetTheCeiling() {
+        ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy", 13, 5, 1, this::warn);
+
+        assertEquals(1, warnings.size());
+        assertTrue(warnings.get(0).contains("recycling.slots"),
+                () -> "warning should name the key that set the ceiling: " + warnings.get(0));
+    }
+
+    @Test
+    void parseRemeltYield_missingKey_fallsBackSilently() {
+        int result = ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy", null, 5, 1, this::warn);
+
+        assertEquals(1, result);
+        assertTrue(warnings.isEmpty(), "a missing key is not an error");
+    }
+
+    @Test
+    void parseRemeltYield_unparseable_fallsBackAndWarns() {
+        int result = ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy", "lots", 5, 1, this::warn);
+
+        assertEquals(1, result);
+        assertEquals(1, warnings.size());
+        assertWarningNames(warnings.get(0), "recycling.yield-remelt-alloy", "lots", "1");
+    }
+
+    /** Zero stays legal -- it is how an operator turns the remelt route off entirely. */
+    @Test
+    void parseRemeltYield_zero_isAcceptedAsADeliberateOptOut() {
+        int result = ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy", 0, 5, 1, this::warn);
+
+        assertEquals(0, result);
+        assertTrue(warnings.isEmpty(), "zero is inside the documented range");
+    }
+
+    @Test
+    void parseRemeltYield_negative_fallsBackAndWarns() {
+        int result = ConfigValidator.parseRemeltYield("recycling.yield-remelt-alloy", -1, 5, 1, this::warn);
+
+        assertEquals(1, result);
+        assertEquals(1, warnings.size());
+        assertWarningNames(warnings.get(0), "recycling.yield-remelt-alloy", "-1", "1");
+    }
+
     // ---- warning message contract --------------------------------------------------
 
     @Test

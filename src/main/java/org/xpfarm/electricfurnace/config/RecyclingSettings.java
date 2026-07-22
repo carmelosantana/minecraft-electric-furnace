@@ -18,8 +18,12 @@ package org.xpfarm.electricfurnace.config;
  * @param yieldMixedAlloy  alloy ingots yielded for a mixed-metal input, whether a named
  *                         recipe or the generic fallback (valid range 0-64)
  * @param yieldRemeltAlloy ingots yielded per alloy item remelted; an all-alloy input of
- *                         N items sharing one alloy id yields N times this
- *                         (valid range 0-64)
+ *                         N items sharing one alloy id yields N times this. The only
+ *                         yield that multiplies by the input count, and so the only one
+ *                         capped relative to {@code slots} rather than at a flat 64 --
+ *                         valid range 0 to {@code 64 / slots}, so that even a full batch
+ *                         fits one output stack. See
+ *                         {@link ConfigValidator#remeltYieldCeiling}.
  * @param acceptDamaged    whether damaged (partially worn) gear is accepted at full yield
  */
 public record RecyclingSettings(

@@ -14,6 +14,7 @@ import org.xpfarm.electricfurnace.alloy.AlloyDefinition;
 import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
 import org.xpfarm.electricfurnace.alloy.AlloyStats;
 import org.xpfarm.electricfurnace.alloy.MetalType;
+import org.xpfarm.electricfurnace.config.ConfigValidator;
 import org.xpfarm.electricfurnace.config.RecyclingSettings;
 import org.xpfarm.electricfurnace.gear.GearBase;
 
@@ -164,6 +165,38 @@ class RecycleResolverTest {
 
         RecycleResult.Remelt remelt = assertInstanceOf(RecycleResult.Remelt.class, result);
         assertEquals(1, remelt.amount());
+    }
+
+    /**
+     * The end-to-end guarantee behind {@code ConfigValidator.remeltYieldCeiling}: rule 2
+     * is the only rule whose amount scales with the input count, so it is the only one
+     * that can outgrow a 64-item output stack. Filling every slot at the largest yield
+     * validation will accept must still resolve to an amount the machine can deposit.
+     *
+     * <p>Checked here rather than in {@code MachineTicker} because the amount is decided
+     * here: {@code MachineRules.classifyOutputSlot} would block an oversized stack rather
+     * than overflow it, but a permanently blocked machine with no explanation is the
+     * failure this ceiling exists to prevent.
+     */
+    @Test
+    void rule2_atTheValidatedYieldCeiling_aFullBatchStillFitsOneStack() {
+        for (int slots = 1; slots <= 9; slots++) {
+            int yield = ConfigValidator.remeltYieldCeiling(slots);
+            RecyclingSettings settings = new RecyclingSettings(slots, 3, 2, yield, true);
+
+            List<RecycleInput> fullBatch = new ArrayList<>();
+            for (int i = 0; i < slots; i++) {
+                fullBatch.add(alloy("steel"));
+            }
+
+            RecycleResult result = RecycleResolver.resolve(fullBatch, settings, REGISTRY);
+
+            RecycleResult.Remelt remelt = assertInstanceOf(RecycleResult.Remelt.class, result);
+            int checkedSlots = slots;
+            assertTrue(remelt.amount() <= 64,
+                    () -> "slots=" + checkedSlots + " at the validated ceiling resolved to "
+                            + remelt.amount() + " ingots, which cannot fit one stack");
+        }
     }
 
     // ---- Rule 3: fewer than `slots` items is rejected, regardless of composition ----

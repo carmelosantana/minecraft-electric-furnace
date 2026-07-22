@@ -56,8 +56,8 @@ import java.util.stream.Collectors;
  * </ol>
  *
  * <p><b>Rule 9 exists to protect items, not to police config.</b> Every
- * {@code recycling.yield-*} key documents a valid range of 0-64, so a zero yield is a
- * legitimate configuration -- an operator turning one recycling route off. Without this
+ * {@code recycling.yield-*} key admits zero, so a zero yield is a legitimate
+ * configuration -- an operator turning one recycling route off. Without this
  * guard, though, the machine builds a zero-amount output stack, the output slot reads as
  * empty rather than blocked, the run completes, and one item is consumed from every
  * occupied input slot for nothing. That is silent item destruction, which this plugin
@@ -115,7 +115,12 @@ public final class RecycleResolver {
             if (alloyIds.size() > 1) {
                 return new RecycleResult.Rejected("mixed alloys");
             }
-            // One ingot batch per item melted, at the configured per-item yield.
+            // One ingot batch per item melted, at the configured per-item yield. This is
+            // the only rule whose amount scales with the input count, which is why
+            // ConfigValidator caps `yield-remelt-alloy` at `64 / slots` -- so this product
+            // always fits one output stack. Enforced there, not clamped here: silently
+            // trimming the amount would consume every input for fewer ingots than the
+            // config promised.
             int amount = inputs.size() * settings.yieldRemeltAlloy();
             if (isZeroYield(amount)) {
                 return ZERO_YIELD;

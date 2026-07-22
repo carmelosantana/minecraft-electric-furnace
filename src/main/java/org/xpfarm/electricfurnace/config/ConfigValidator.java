@@ -28,6 +28,13 @@ import java.util.function.Consumer;
  */
 public final class ConfigValidator {
 
+    /**
+     * Minecraft's maximum items in one stack, for the ingots the recycler produces. A
+     * plain constant rather than {@code Material#getMaxStackSize} so this class stays
+     * Bukkit-free and testable without a running server.
+     */
+    private static final int MAX_ITEMS_PER_STACK = 64;
+
     private ConfigValidator() {
     }
 
@@ -116,6 +123,66 @@ public final class ConfigValidator {
         }
         warn.accept(unparseableMessage(key, raw, fallback));
         return fallback;
+    }
+
+    /**
+     * The largest {@code recycling.yield-remelt-alloy} that {@code slots} input slots can
+     * safely produce: {@code 64 / slots}, floored.
+     *
+     * <p>Remelt is the only recycling outcome whose amount scales with the input count --
+     * an all-alloy input of N items yields {@code N x yield-remelt-alloy}, so N and the
+     * yield multiply. The other {@code yield-*} keys are flat per operation and cannot
+     * outgrow a stack, which is why only this one is capped.
+     *
+     * <p>Without the cap, a yield of 13 at the default 5 slots resolves a full batch to
+     * 65 ingots. That never overflows -- {@code MachineRules.classifyOutputSlot} rejects
+     * an oversized candidate rather than merging it -- but it leaves the machine
+     * permanently "output blocked" with nothing in any log to say why. The ceiling turns
+     * that silent, in-game dead end into one warning at load naming both keys.
+     *
+     * <p>The floor is deliberate: at 9 slots it yields 7 (a 63-ingot batch) rather than
+     * rounding up to 8 (72, which would not fit).
+     */
+    public static int remeltYieldCeiling(int slots) {
+        // Callers pass an already-validated 1-9, but this class never throws, and a bare
+        // division would turn a zero here into an ArithmeticException escaping config
+        // load. One slot is the most permissive reading, matching the fallback spirit of
+        // every other method here.
+        return MAX_ITEMS_PER_STACK / Math.max(1, slots);
+    }
+
+    /**
+     * Parses {@code recycling.yield-remelt-alloy} against the slot-dependent ceiling from
+     * {@link #remeltYieldCeiling}, with the same missing/unparseable/out-of-range
+     * handling as {@link #parseInt} -- plus an explanation of where the ceiling came
+     * from, since a bare "must be between 0 and 12" gives the operator no way to connect
+     * the limit to {@code recycling.slots}.
+     *
+     * <p>Zero remains valid: it is how an operator turns the remelt route off entirely,
+     * and {@code RecycleResolver}'s zero-yield rule already stops the machine rather than
+     * consuming items for nothing.
+     *
+     * @param slots the already-validated {@code recycling.slots}, which sets the ceiling
+     */
+    public static int parseRemeltYield(String key, Object raw, int slots, int fallback, Consumer<String> warn) {
+        if (raw == null) {
+            return fallback;
+        }
+        Integer parsed = asInt(raw);
+        if (parsed == null) {
+            warn.accept(unparseableMessage(key, raw, fallback));
+            return fallback;
+        }
+        int ceiling = remeltYieldCeiling(slots);
+        if (parsed < 0 || parsed > ceiling) {
+            warn.accept(outOfRangeMessage(key, parsed, 0, ceiling, fallback)
+                    + " The upper bound is set by 'recycling.slots' (" + slots + "): a full batch of "
+                    + slots + " alloy items yields " + slots + " times this value, and anything past "
+                    + MAX_ITEMS_PER_STACK + " cannot fit the output slot, which would leave the machine"
+                    + " permanently blocked.");
+            return fallback;
+        }
+        return parsed;
     }
 
     private static Integer asInt(Object raw) {
