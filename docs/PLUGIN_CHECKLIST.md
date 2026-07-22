@@ -6,7 +6,7 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 - Slug: `electric-furnace`
 - Repository: `carmelosantana/minecraft-electric-furnace`
 - Owner: `Carmelo Santana`
-- Target version: `0.3.0`
+- Target version: `0.3.1`
 - Paper version: `26.1.2 build 74`
 - Java version: `25`
 - Updater destination: `electric-furnace.jar`
