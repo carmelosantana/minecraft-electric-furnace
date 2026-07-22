@@ -17,12 +17,14 @@ import org.xpfarm.electricfurnace.gear.GearBase;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -251,6 +253,88 @@ class AlloyRegistryTest {
     private static AlloyDefinition fallback() {
         return new AlloyDefinition("fused_alloy", "Fused Alloy", List.of(), "#4B4B4B", Set.of(),
                 BASELINE_STATS, GearBase.IRON);
+    }
+
+    // ---- all() iterates in the order the definitions were supplied ------------------
+
+    /**
+     * {@code /electricfurnace info} prints its "Alloy recipes:" block by iterating
+     * {@link AlloyRegistry#all()}, so this map's iteration order is player-facing and
+     * must be the order the operator wrote in {@code config.yml}. An unordered
+     * immutable copy (e.g. {@code Map.copyOf}) satisfies every other test in this class
+     * while making that listing vary between JVM runs -- its iteration order is
+     * unspecified and salted per run.
+     *
+     * <p>The ids below are deliberately neither alphabetical nor the shipped
+     * {@code config.yml} order, and the fallback deliberately sits in the middle rather
+     * than at either end, so neither incidental sorting nor "fallback last" can pass
+     * this by accident.
+     */
+    @Test
+    void fromDefinitions_allIteratesInTheSuppliedOrder() {
+        List<String> configuredOrder = List.of(
+                "steel", "rose_gold", "tungsten", "fused_alloy",
+                "ferrocopper", "bronze", "electrum_steel", "invar");
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(
+                configuredOrder.stream().map(AlloyRegistryTest::definitionNamed).toList(), this::warn);
+
+        assertEquals(configuredOrder, registry.all().stream().map(AlloyDefinition::id).toList());
+    }
+
+    /** The synthesized fallback is appended, so it lands last rather than displacing anything. */
+    @Test
+    void fromDefinitions_synthesizedFallback_isAppendedAfterTheConfiguredAlloys() {
+        List<String> configuredOrder = List.of("steel", "rose_gold", "ferrocopper", "electrum_steel");
+
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(
+                configuredOrder.stream().map(AlloyRegistryTest::definitionNamed).toList(), this::warn);
+
+        assertEquals(List.of("steel", "rose_gold", "ferrocopper", "electrum_steel", "fused_alloy"),
+                registry.all().stream().map(AlloyDefinition::id).toList());
+    }
+
+    /** Preserving order must not cost immutability: the exposed view stays unmodifiable. */
+    @Test
+    void fromDefinitions_all_isUnmodifiable() {
+        AlloyRegistry registry = AlloyRegistry.fromDefinitions(
+                List.of(definitionNamed("steel"), fallback()), this::warn);
+        Collection<AlloyDefinition> all = registry.all();
+
+        assertThrows(UnsupportedOperationException.class, all::clear);
+        assertThrows(UnsupportedOperationException.class, () -> all.remove(all.iterator().next()));
+    }
+
+    /**
+     * The end-to-end chain the {@code Alloy recipes:} listing actually depends on:
+     * {@code config.yml} order must survive {@code getKeys(false)}, the parse, the
+     * balance-ceiling clamp, and the final map, all the way to {@link
+     * AlloyRegistry#all()}. The two {@code fromDefinitions} tests above pin the last
+     * link only; this one pins the assumption that the earlier links are ordered too.
+     */
+    @Test
+    void load_allIteratesInConfigFileOrder() {
+        List<String> fileOrder = List.of("steel", "rose_gold", "fused_alloy", "ferrocopper", "electrum_steel");
+        YamlConfiguration yaml = new YamlConfiguration();
+        for (String id : fileOrder) {
+            yaml.set(id + ".display-name", id);
+            if (!"fused_alloy".equals(id)) {
+                yaml.set(id + ".inputs", List.of("iron", id));
+            }
+        }
+
+        AlloyRegistry registry = AlloyRegistry.load(yaml.getConfigurationSection(""), this::warn);
+
+        assertEquals(fileOrder, registry.all().stream().map(AlloyDefinition::id).toList());
+    }
+
+    /**
+     * A named (non-fallback) definition for {@code id}, except for {@code fused_alloy},
+     * which takes the empty inputs that mark it the fallback.
+     */
+    private static AlloyDefinition definitionNamed(String id) {
+        Set<String> inputs = "fused_alloy".equals(id) ? Set.of() : Set.of("iron", id);
+        return new AlloyDefinition(id, id, List.of(), "#000000", inputs, BASELINE_STATS, GearBase.IRON);
     }
 
     // ---- M4: one malformed alloy entry must not take down the whole load ------------

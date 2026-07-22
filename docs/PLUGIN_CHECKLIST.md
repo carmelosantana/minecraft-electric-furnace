@@ -475,6 +475,20 @@ decision is `minecraft-plugin-release`'s, not this gate's.
 
 ### `0.3.0` (alloy gear crafting) — supersedes everything below it
 
+**Alloy listing order fix (2026-07-22, after the 416-test run below).**
+`AlloyRegistry.fromDefinitions` built its map in a `LinkedHashMap` but returned
+`Map.copyOf(clamped)`, whose iteration order is unspecified and salted per JVM run.
+That order is player-facing: `ElectricFurnaceCommand.handleInfo` prints the
+`Alloy recipes:` block by iterating `all()`, so the listing shuffled between restarts
+and never matched `config.yml`. Now `Collections.unmodifiableMap(new LinkedHashMap<>(clamped))`
+— ordered, still unmodifiable. **4 new tests** in `AlloyRegistryTest`, all verified to
+fail against the old line before the fix landed: `fromDefinitions` order preservation
+(8 ids, fallback deliberately mid-list), synthesized-fallback-appended-last, the
+`load` chain end-to-end (pins that `getKeys(false)` and the parse are ordered too),
+and an unmodifiability guard. `mvn --batch-mode --no-transfer-progress clean verify` →
+**exit 0, BUILD SUCCESS, 420 tests, 0 failures, 0 errors, 0 skipped**, still exactly
+**2** `[WARNING]` lines, unchanged and both in `MachineGuiListenerTest.java:70,246`.
+
 `mvn --batch-mode --no-transfer-progress clean verify` → **exit 0, BUILD SUCCESS,
 416 tests, 0 failures, 0 errors, 0 skipped** (2026-07-22, run directly by the
 controller, not relayed). Exactly **2** `[WARNING]` lines, both pre-existing and both

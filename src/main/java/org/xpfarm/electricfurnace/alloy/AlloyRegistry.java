@@ -14,6 +14,7 @@ import org.xpfarm.electricfurnace.gear.GearBase;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -108,7 +109,12 @@ public final class AlloyRegistry {
             fallbackId = synthesized.id();
         }
 
-        return new AlloyRegistry(Map.copyOf(clamped), fallbackId);
+        // An unmodifiable *ordered* copy, deliberately not Map.copyOf: /electricfurnace
+        // info prints its alloy listing by iterating all(), so this map's iteration
+        // order is player-facing and must stay the order the operator wrote in
+        // config.yml. Map.copyOf's iteration order is unspecified and salted per JVM
+        // run, so the listing would shuffle between restarts.
+        return new AlloyRegistry(Collections.unmodifiableMap(new LinkedHashMap<>(clamped)), fallbackId);
     }
 
     /**
@@ -198,7 +204,12 @@ public final class AlloyRegistry {
         return Optional.ofNullable(byId.get(id));
     }
 
-    /** All loaded definitions, including the fallback. */
+    /**
+     * All loaded definitions, including the fallback, in the order they were
+     * configured -- a synthesized fallback sorts last, having been appended. This
+     * ordering is player-facing: {@code /electricfurnace info} lists alloys by
+     * iterating this collection. Unmodifiable.
+     */
     public Collection<AlloyDefinition> all() {
         return byId.values();
     }
