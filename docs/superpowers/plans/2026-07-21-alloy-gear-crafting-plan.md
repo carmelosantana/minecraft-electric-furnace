@@ -1106,7 +1106,7 @@ Append to `AlloyRegistryTest`:
 
 Add `import org.xpfarm.electricfurnace.gear.GearBase;` to the test's import block.
 
-These three tests go through the `baseOf` helper above because `AlloyRegistry` exposes only `all()` — verified, it has no by-id lookup. Do not add one just for the tests.
+**Correction (found during execution): the premise behind `baseOf` was wrong.** `AlloyRegistry.get(String id)` returning `Optional<AlloyDefinition>` already exists and is already used by pre-existing tests. The plan's earlier claim that only `all()` was available came from a grep that searched for the wrong method name. Use `registry.get(id).orElseThrow().base()` directly and do not add the `baseOf` helper.
 
 - [ ] **Step 2: Run test to verify it fails**
 
