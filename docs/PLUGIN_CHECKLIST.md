@@ -800,6 +800,21 @@ log line. Stack torn down with `matrix down`; lease released, no orphaned contai
 
 ## 8. CI/CD
 
+### `0.3.0` — main-branch run recorded before tagging (2026-07-22)
+
+- [x] Successful main Actions run is recorded before tagging.
+  - Run `29941249477`, `Build and release`, branch `main`, commit `fe8f723`
+    (`Merge alloy-gear-crafting: 30 craftable alloy weapons and armor (0.3.0)`)
+    → **completed / success**, 36s.
+  - **The run was `in_progress` when first checked and was deliberately waited out
+    rather than tagged around.** A still-running run is exactly as disqualifying as a
+    failed one — it is not evidence yet, in either direction, and tagging into it races
+    production. Resolved to a completed success before the tag was created.
+  - The only warnings are the two known pre-existing
+    `InventoryAction.HOTBAR_MOVE_AND_READD` deprecations in
+    `MachineGuiListenerTest.java:70,246`, matching the local build exactly. No new
+    warnings introduced by this branch.
+
 **`0.2.0` note:** the workflow file itself (checkbox 1) and its permission scope
 (checkbox 3) are durable facts unaffected by this branch's content and remain
 accurate as recorded. Checkbox 2's run/commit reference predates this branch and is
@@ -837,6 +852,33 @@ pass can produce.
   - `permissions: contents: write` only. No `packages:`, `id-token:`, or other scopes.
 
 ## 9. Release
+
+### `0.3.0` — RELEASED and verified (2026-07-22)
+
+<https://github.com/carmelosantana/minecraft-electric-furnace/releases/tag/v0.3.0>
+
+- [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag.
+  - POM `<version>0.3.0</version>`; `plugin.yml` uses `version: '${project.version}'`
+    with no hardcoded drift; the embedded `plugin.yml` in the shaded JAR reads
+    `version: '0.3.0'`; annotated tag `v0.3.0` → `fe8f723`, the exact commit gate 8's
+    green run validated.
+- [x] Tag run succeeded and the release exists.
+  - Run `29941305264`, branch `v0.3.0` → **completed / success**, 28s.
+  - Release created by `github-actions[bot]`, published `2026-07-22T17:12:08Z`,
+    `draft: false`, `prerelease: false`.
+- [x] Asset contract satisfied — exactly one updater-matching JAR plus checksums.
+  - Assets are exactly `electric-furnace-0.3.0.jar` and `SHA256SUMS.txt`.
+  - **No `original-*` JAR leaked** — the pre-shade Maven Shade intermediate is excluded
+    by the workflow, confirmed by listing the downloaded release directory.
+- [x] `sha256sum --check` passes against the published assets.
+  - Downloaded the release and ran `sha256sum --check SHA256SUMS.txt` →
+    `electric-furnace-0.3.0.jar: OK`, exit 0.
+
+**Released with client behaviour unverified, deliberately and with eyes open.** Gate 7a
+passed everything reachable headlessly, but no gear item was ever minted — console has
+no inventory, so `GearItemFactory.create` never executed. The full play-test obligation
+is enumerated under §7 above and is owed on `play.xpfarm.org`. This release exists so
+that testing can happen; it is not evidence that the feature works in a client.
 
 **`0.2.0` has not been tagged or released.** Everything below this line records the
 `v0.1.0`/`v0.1.1` release history, which remains accurate as history but is not
