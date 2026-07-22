@@ -11,6 +11,7 @@ package org.xpfarm.electricfurnace.gear;
 
 import org.junit.jupiter.api.Test;
 import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
+import org.xpfarm.electricfurnace.alloy.AlloyStats;
 
 import java.util.Map;
 
@@ -134,5 +135,109 @@ class GearStatsDeriverTest {
     void armorBaseUnit_roundsToNearestRatherThanTruncating() {
         // (800-250)/1311 * 18 + 15 = 22.55 -- nearest is 23; truncating would give 22.
         assertEquals(23, GearStatsDeriver.armorBaseUnit(800));
+    }
+
+    // Steel, as shipped in config.yml.
+    private static final AlloyStats STEEL = new AlloyStats(6.5, -2.6, 16, 1.0, 700, 12);
+
+    @Test
+    void derive_sword_usesConfiguredCombatStatsAndToolDurability() {
+        GearStats stats = GearStatsDeriver.derive(STEEL, GearPiece.SWORD);
+
+        assertEquals(6.5, stats.attackDamage());
+        assertEquals(-2.6, stats.attackSpeed());
+        assertEquals(700, stats.maxDurability());
+        assertEquals(12, stats.enchantability());
+        assertEquals(0, stats.armor());
+        assertEquals(0.0, stats.armorToughness());
+    }
+
+    @Test
+    void derive_axe_appliesTheVanillaAxeDelta() {
+        GearStats stats = GearStatsDeriver.derive(STEEL, GearPiece.AXE);
+
+        assertEquals(8.5, stats.attackDamage(), 1e-9);
+        assertEquals(-3.2, stats.attackSpeed(), 1e-9);
+        assertEquals(700, stats.maxDurability());
+    }
+
+    @Test
+    void derive_armor_matchesTheWorkedExampleInTheSpec() {
+        assertEquals(2, GearStatsDeriver.derive(STEEL, GearPiece.HELMET).armor());
+        assertEquals(7, GearStatsDeriver.derive(STEEL, GearPiece.CHESTPLATE).armor());
+        assertEquals(5, GearStatsDeriver.derive(STEEL, GearPiece.LEGGINGS).armor());
+        assertEquals(2, GearStatsDeriver.derive(STEEL, GearPiece.BOOTS).armor());
+
+        assertEquals(231, GearStatsDeriver.derive(STEEL, GearPiece.HELMET).maxDurability());
+        assertEquals(336, GearStatsDeriver.derive(STEEL, GearPiece.CHESTPLATE).maxDurability());
+        assertEquals(315, GearStatsDeriver.derive(STEEL, GearPiece.LEGGINGS).maxDurability());
+        assertEquals(273, GearStatsDeriver.derive(STEEL, GearPiece.BOOTS).maxDurability());
+    }
+
+    @Test
+    void derive_armor_readsTheAlloyRatherThanReusingSteelsNumbers() {
+        // Every other armor assertion here derives from STEEL, so on its own each one
+        // is also satisfied by an implementation that hardcodes steel's split (16),
+        // steel's armor base unit (21) or steel's toughness (1.0). Electrum Steel is a
+        // second alloy whose three armor inputs all differ, so this pins the armor
+        // branch to its arguments: split of 18, base unit of 24, toughness of 1.5.
+        AlloyStats electrumSteel = new AlloyStats(6.8, -2.4, 18, 1.5, 900, 16);
+
+        assertEquals(3, GearStatsDeriver.derive(electrumSteel, GearPiece.HELMET).armor());
+        assertEquals(7, GearStatsDeriver.derive(electrumSteel, GearPiece.CHESTPLATE).armor());
+        assertEquals(5, GearStatsDeriver.derive(electrumSteel, GearPiece.LEGGINGS).armor());
+        assertEquals(3, GearStatsDeriver.derive(electrumSteel, GearPiece.BOOTS).armor());
+
+        assertEquals(264, GearStatsDeriver.derive(electrumSteel, GearPiece.HELMET).maxDurability());
+        assertEquals(384, GearStatsDeriver.derive(electrumSteel, GearPiece.CHESTPLATE).maxDurability());
+        assertEquals(360, GearStatsDeriver.derive(electrumSteel, GearPiece.LEGGINGS).maxDurability());
+        assertEquals(312, GearStatsDeriver.derive(electrumSteel, GearPiece.BOOTS).maxDurability());
+
+        assertEquals(1.5, GearStatsDeriver.derive(electrumSteel, GearPiece.CHESTPLATE).armorToughness());
+    }
+
+    @Test
+    void derive_armor_carriesToughnessPerPieceNotSplit() {
+        // Vanilla grants diamond's 2.0 toughness on every piece, not 0.5 each.
+        for (GearPiece piece : GearPiece.armorPieces()) {
+            assertEquals(1.0, GearStatsDeriver.derive(STEEL, piece).armorToughness());
+        }
+    }
+
+    @Test
+    void derive_armor_hasNoCombatStats() {
+        for (GearPiece piece : GearPiece.armorPieces()) {
+            GearStats stats = GearStatsDeriver.derive(STEEL, piece);
+            assertEquals(0.0, stats.attackDamage());
+            assertEquals(0.0, stats.attackSpeed());
+        }
+    }
+
+    @Test
+    void derive_enchantabilityPassesThroughToEveryPiece() {
+        for (GearPiece piece : GearPiece.values()) {
+            assertEquals(12, GearStatsDeriver.derive(STEEL, piece).enchantability());
+        }
+    }
+
+    @Test
+    void derive_armorAcrossAllPieces_sumsToTheConfiguredTotal() {
+        int sum = GearPiece.armorPieces().stream()
+                .mapToInt(piece -> GearStatsDeriver.derive(STEEL, piece).armor())
+                .sum();
+        assertEquals(STEEL.armor(), sum);
+    }
+
+    @Test
+    void derive_axeDamageMayExceedTheNetheriteSwordReference() {
+        // Electrum Steel: 6.8 + 2.0 = 8.8, above NETHERITE_ATTACK_DAMAGE (8.0).
+        // Deliberate -- the references are sword-scale, and vanilla's netherite axe
+        // does 10.0 against its sword's 8.0. Clamping here would make every alloy axe
+        // worse than its own sword is allowed to be.
+        AlloyStats electrumSteel = new AlloyStats(6.8, -2.4, 18, 1.5, 900, 16);
+
+        assertEquals(8.8, GearStatsDeriver.derive(electrumSteel, GearPiece.AXE).attackDamage(), 1e-9);
+        assertTrue(GearStatsDeriver.derive(electrumSteel, GearPiece.AXE).attackDamage()
+                > AlloyRegistry.NETHERITE_ATTACK_DAMAGE);
     }
 }

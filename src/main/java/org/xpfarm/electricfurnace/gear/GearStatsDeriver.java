@@ -10,12 +10,14 @@
 package org.xpfarm.electricfurnace.gear;
 
 import org.xpfarm.electricfurnace.alloy.AlloyRegistry;
+import org.xpfarm.electricfurnace.alloy.AlloyStats;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Derives one gear piece's stats from an alloy's single stat block.
@@ -106,5 +108,40 @@ public final class GearStatsDeriver {
         double position = (maxDurability - AlloyRegistry.IRON_MAX_DURABILITY) / span;
         long projected = Math.round(IRON_ARMOR_BASE + position * (DIAMOND_ARMOR_BASE - IRON_ARMOR_BASE));
         return (int) Math.clamp(projected, IRON_ARMOR_BASE, NETHERITE_ARMOR_BASE);
+    }
+
+    /**
+     * Derives one piece's stats from an alloy's stat block.
+     *
+     * <p>No balance clamp runs here. {@code AlloyRegistry.clampStats} has already
+     * clamped {@code stats} at load time, so gear inherits clamped values for free --
+     * and re-clamping the derived axe damage would be wrong, since vanilla's own
+     * netherite axe exceeds its netherite sword.
+     *
+     * @param stats the alloy's already-clamped stat block
+     * @param piece the piece being derived
+     * @return the concrete stat block for that one item
+     */
+    public static GearStats derive(AlloyStats stats, GearPiece piece) {
+        Objects.requireNonNull(stats, "stats");
+        Objects.requireNonNull(piece, "piece");
+
+        if (piece.kind() == GearPiece.Kind.WEAPON) {
+            return new GearStats(
+                    stats.attackDamage() + piece.attackDamageDelta(),
+                    stats.attackSpeed() + piece.attackSpeedDelta(),
+                    0,
+                    0.0,
+                    stats.maxDurability(),
+                    stats.enchantability());
+        }
+
+        return new GearStats(
+                0.0,
+                0.0,
+                splitArmor(stats.armor()).get(piece),
+                stats.armorToughness(),
+                armorBaseUnit(stats.maxDurability()) * piece.durabilityFactor(),
+                stats.enchantability());
     }
 }
