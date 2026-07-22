@@ -96,9 +96,10 @@ recycling:
 # do not want that, give that alloy a different `base`.
 #
 # The copper base needs Minecraft 1.21.9 or newer -- vanilla copper equipment does not
-# exist before that. On an older server a copper-based alloy mints no gear at all: its
-# recipes are skipped, each named in a startup warning. The shipped ferrocopper alloy
-# uses this base.
+# exist before that. That version floor is the whole plugin's, not this key's: the
+# recycler's metal table names copper equipment directly, so on an older server it fails
+# to load and nothing recycles at all. Run 1.21.9 or newer. The shipped ferrocopper
+# alloy uses this base.
 alloys:
   steel:
     display-name: "Steel"
