@@ -94,6 +94,18 @@ public final class GearRecipes implements Listener {
 
     private void registerOne(AlloyDefinition definition, GearPiece piece) {
         try {
+            // Removed unconditionally, and BEFORE the buildability check below, for two
+            // separate reasons. Unconditionally, not only via unregister(): a key left
+            // behind by a previous plugin instance is not in this instance's tracking
+            // list, and addRecipe throws on a duplicate. Before the check: a piece that
+            // has BECOME unbuildable -- an operator moves an alloy's base from
+            // netherite to copper on a server without copper equipment, then runs
+            // /reload confirm -- must not keep the previous instance's recipe alive,
+            // untracked and still craftable for its old result while the log claims the
+            // recipe was skipped. Clearing the key first makes "skipped" mean skipped.
+            NamespacedKey key = keyFor(definition.id(), piece);
+            Bukkit.removeRecipe(key);
+
             Optional<ItemStack> result = GearItemFactory.create(definition, piece);
             if (result.isEmpty()) {
                 warn.accept("Alloy '" + definition.id() + "' has no " + piece.id()
@@ -102,7 +114,6 @@ public final class GearRecipes implements Listener {
                 return;
             }
 
-            NamespacedKey key = keyFor(definition.id(), piece);
             ShapedRecipe recipe = new ShapedRecipe(key, result.get());
             recipe.shape(shapeFor(piece));
             recipe.setIngredient('I', new RecipeChoice.ExactChoice(AlloyItemFactory.create(definition)));
@@ -110,10 +121,6 @@ public final class GearRecipes implements Listener {
                 recipe.setIngredient('S', new RecipeChoice.MaterialChoice(Material.STICK));
             }
 
-            // Unconditional, not only via unregister(): a key left behind by a previous
-            // plugin instance is not in this instance's tracking list, and addRecipe
-            // throws on a duplicate.
-            Bukkit.removeRecipe(key);
             Bukkit.addRecipe(recipe);
             registered.add(key);
         } catch (Throwable failure) {
@@ -201,7 +208,52 @@ public final class GearRecipes implements Listener {
      */
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
+        discoverAll(event.getPlayer());
+    }
+
+    /**
+     * Pushes the current recipe set to everyone <em>already</em> online.
+     *
+     * <p>{@link #onJoin} only ever fires on join, so without this a player who was on
+     * the server when {@link #register()} ran is left behind. That happens on both
+     * re-registration paths: {@code /electricfurnace reload}, and the
+     * {@code /reload confirm} that re-enables this plugin under a live player's feet.
+     * Two distinct things go stale for that player, and each needs its own half of this
+     * method:
+     *
+     * <ul>
+     *   <li><b>The recipe book's unlock set.</b> Removing a recipe may discard the
+     *       players' discovery flag for it -- the API says so in as many words -- and a
+     *       newly-added alloy was never discovered by anyone. Hence the re-discovery
+     *       loop; {@code discoverRecipe} is a no-op for a key already unlocked, so this
+     *       costs nothing when nothing changed.</li>
+     *   <li><b>The recipe data the client has cached.</b> Neither
+     *       {@code Bukkit.removeRecipe} nor {@code Bukkit.addRecipe} resends anything on
+     *       its own, so a client keeps rendering the ingredient and result it was last
+     *       sent -- a reload that changes an ingot's colour would otherwise show the old
+     *       one in the book until relog. {@code Bukkit.updateRecipes()} is Paper's
+     *       "updates recipe data and the recipe book to each player" resend and is the
+     *       whole of the server-side fix. It is called once, after the whole batch,
+     *       rather than through the per-recipe {@code resendRecipes} overloads, which
+     *       would push a full recipe list to every player thirty times over.</li>
+     * </ul>
+     *
+     * <p>Never throws: called from the enable path and from the reload path.
+     */
+    public void refreshOnlinePlayers() {
+        try {
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                discoverAll(player);
+            }
+            // Last, so the resend carries the discovery state set just above.
+            Bukkit.updateRecipes();
+        } catch (Throwable failure) {
+            warn.accept("Failed to refresh gear recipes for online players: " + failure.getMessage());
+        }
+    }
+
+    /** Unlocks every tracked key for one player; one bad key costs only itself. */
+    private void discoverAll(Player player) {
         for (NamespacedKey key : registered) {
             try {
                 player.discoverRecipe(key);
