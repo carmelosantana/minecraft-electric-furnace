@@ -86,10 +86,19 @@ recycling:
 # forms. Omit it to accept the thematic default. An unrecognized value warns and falls
 # back to that default.
 #
-# Two bases carry vanilla behaviour worth knowing about: gold makes piglins neutral
-# toward the wearer (driven by an item tag, so it cannot be stripped per item), and
-# netherite grants fire immunity and knockback resistance -- both of which this plugin
-# removes from minted gear.
+# The netherite base normally grants fire immunity and knockback resistance. This
+# plugin strips both from minted gear -- a netherite-based alloy gets neither.
+#
+# The gold base makes piglins neutral toward the wearer, and that one cannot be turned
+# off. It rides on the `#minecraft:piglin_safe_armor` item tag rather than a per-item
+# component, so no lever exists to remove it. The shipped rose_gold alloy uses this
+# base, so Rose Gold gear permanently pacifies piglins toward whoever wears it. If you
+# do not want that, give that alloy a different `base`.
+#
+# The copper base needs Minecraft 1.21.9 or newer -- vanilla copper equipment does not
+# exist before that. On an older server a copper-based alloy mints no gear at all: its
+# recipes are skipped, each named in a startup warning. The shipped ferrocopper alloy
+# uses this base.
 alloys:
   steel:
     display-name: "Steel"
