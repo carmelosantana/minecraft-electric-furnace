@@ -386,6 +386,113 @@ class RecycleResolverTest {
         assertEquals(10, remelt.amount());
     }
 
+    // ---- Rule 9: a zero computed yield rejects rather than destroying the inputs ------
+
+    @Test
+    void rule9_zeroRemeltYield_rejected_ratherThanConsumingEveryAlloyItem() {
+        // yield-remelt-alloy: 0 is inside the documented 0-64 range. Without this rule the
+        // downstream machine deposits an empty stack and still consumes every input slot,
+        // silently destroying up to `slots` alloy items.
+        RecyclingSettings settings = new RecyclingSettings(5, 3, 2, 0, true);
+        List<RecycleInput> inputs = List.of(alloy("steel"), alloy("steel"), alloy("steel"),
+                alloy("steel"), alloy("steel"));
+
+        RecycleResult result = RecycleResolver.resolve(inputs, settings, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("zero yield", rejected.reason());
+    }
+
+    @Test
+    void rule9_zeroRemeltYield_rejectsASingleAlloyItemToo() {
+        RecyclingSettings settings = new RecyclingSettings(5, 3, 2, 0, true);
+
+        RecycleResult result = RecycleResolver.resolve(List.of(alloy("rose_gold")), settings, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("zero yield", rejected.reason());
+    }
+
+    @Test
+    void rule9_zeroSameMetalYield_rejected() {
+        RecyclingSettings settings = new RecyclingSettings(5, 0, 2, 1, true);
+        List<RecycleInput> inputs = List.of(iron(), iron(), iron(), iron(), iron());
+
+        RecycleResult result = RecycleResolver.resolve(inputs, settings, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("zero yield", rejected.reason());
+    }
+
+    @Test
+    void rule9_zeroMixedAlloyYield_rejectsANamedAlloyMatch() {
+        RecyclingSettings settings = new RecyclingSettings(5, 3, 0, 1, true);
+        List<RecycleInput> inputs = List.of(iron(), iron(), iron(), iron(), coal());
+
+        RecycleResult result = RecycleResolver.resolve(inputs, settings, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("zero yield", rejected.reason());
+    }
+
+    @Test
+    void rule9_zeroMixedAlloyYield_rejectsTheGenericFallbackToo() {
+        RecyclingSettings settings = new RecyclingSettings(5, 3, 0, 1, true);
+        List<RecycleInput> inputs = List.of(iron(), gold(), copper(), iron(), gold());
+
+        RecycleResult result = RecycleResolver.resolve(inputs, settings, REGISTRY);
+
+        RecycleResult.Rejected rejected = assertInstanceOf(RecycleResult.Rejected.class, result);
+        assertEquals("zero yield", rejected.reason());
+    }
+
+    @Test
+    void rule9_zeroYieldOnOneOutcomeDoesNotRejectTheOthers() {
+        // Only the yield that is actually consulted for this input may reject it: zeroing
+        // the remelt yield must leave same-metal and alloy recycling working normally.
+        RecyclingSettings settings = new RecyclingSettings(5, 3, 2, 0, true);
+
+        RecycleResult.SameMetal sameMetal = assertInstanceOf(RecycleResult.SameMetal.class,
+                RecycleResolver.resolve(List.of(iron(), iron(), iron(), iron(), iron()), settings, REGISTRY));
+        RecycleResult.NamedAlloy namedAlloy = assertInstanceOf(RecycleResult.NamedAlloy.class,
+                RecycleResolver.resolve(List.of(iron(), iron(), iron(), iron(), coal()), settings, REGISTRY));
+
+        assertEquals(3, sameMetal.amount());
+        assertEquals(2, namedAlloy.amount());
+    }
+
+    @Test
+    void rule9_aPositiveYieldIsStillAccepted_atTheSmallestNonZeroValue() {
+        // Guards against a `<= 0` check drifting to `< 1`'s neighbour `<= 1`.
+        RecyclingSettings settings = new RecyclingSettings(5, 1, 1, 1, true);
+
+        RecycleResult.SameMetal sameMetal = assertInstanceOf(RecycleResult.SameMetal.class,
+                RecycleResolver.resolve(List.of(iron(), iron(), iron(), iron(), iron()), settings, REGISTRY));
+        RecycleResult.Remelt remelt = assertInstanceOf(RecycleResult.Remelt.class,
+                RecycleResolver.resolve(List.of(alloy("steel")), settings, REGISTRY));
+
+        assertEquals(1, sameMetal.amount());
+        assertEquals(1, remelt.amount());
+    }
+
+    @Test
+    void rule9_zeroYieldRejectionBeatsNothingEarlier_mixedAlloysStillRejectAsMixed() {
+        // The zero-yield guard sits inside each outcome, so an input that never reaches an
+        // outcome keeps its own, more specific rejection reason.
+        RecyclingSettings settings = new RecyclingSettings(5, 0, 0, 0, true);
+
+        RecycleResult.Rejected mixed = assertInstanceOf(RecycleResult.Rejected.class,
+                RecycleResolver.resolve(List.of(alloy("steel"), alloy("rose_gold")), settings, REGISTRY));
+        RecycleResult.Rejected empty = assertInstanceOf(RecycleResult.Rejected.class,
+                RecycleResolver.resolve(List.of(), settings, REGISTRY));
+        RecycleResult.Rejected noMetal = assertInstanceOf(RecycleResult.Rejected.class,
+                RecycleResolver.resolve(List.of(coal(), coal(), coal(), coal(), coal()), settings, REGISTRY));
+
+        assertEquals("mixed alloys", mixed.reason());
+        assertEquals("empty", empty.reason());
+        assertEquals("no metal", noMetal.reason());
+    }
+
     // ---- Test fixtures ---------------------------------------------------------------
 
     private static RecycleInput iron() {

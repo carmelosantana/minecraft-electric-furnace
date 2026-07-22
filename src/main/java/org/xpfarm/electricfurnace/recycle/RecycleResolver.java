@@ -28,7 +28,7 @@ import java.util.stream.Collectors;
  * or its tests -- every input is a plain {@link RecycleInput}, every yield number
  * comes from the caller-supplied {@link RecyclingSettings}, never hardcoded here.
  *
- * <p>Resolution proceeds through eight rules, in this exact precedence order. Each
+ * <p>Resolution proceeds through nine rules, in this exact precedence order. Each
  * rule is checked only after every earlier rule has failed to apply:
  *
  * <ol>
@@ -48,7 +48,20 @@ import java.util.stream.Collectors;
  *   <li>The input's distinct set of metal/modifier ids matches a named alloy recipe
  *       -&gt; {@code NAMED_ALLOY}.</li>
  *   <li>Otherwise -&gt; {@code GENERIC_ALLOY} (the registry's fallback recipe).</li>
+ *   <li>Any of the four yield-bearing outcomes above whose computed amount is
+ *       {@code <= 0} -&gt; {@code REJECTED("zero yield")} instead. Not a step in the
+ *       precedence chain but a guard applied at the point each outcome is built, so an
+ *       input that never reaches an outcome keeps its own, more specific reason.</li>
  * </ol>
+ *
+ * <p><b>Rule 9 exists to protect items, not to police config.</b> Every
+ * {@code recycling.yield-*} key documents a valid range of 0-64, so a zero yield is a
+ * legitimate configuration -- an operator turning one recycling route off. Without this
+ * guard, though, the machine builds a zero-amount output stack, the output slot reads as
+ * empty rather than blocked, the run completes, and one item is consumed from every
+ * occupied input slot for nothing. That is silent item destruction, which this plugin
+ * never does. Rejecting instead simply stops the machine, exactly as any other
+ * unresolvable input does.
  *
  * <p><b>Rule 6 vs. rule 7, the subtlest interaction:</b> "4 iron + 1 coal" is
  * <em>not</em> all-same-metal, even though every metal present is iron -- the mere
@@ -60,6 +73,9 @@ import java.util.stream.Collectors;
  * 4 and 5, checked afterward.
  */
 public final class RecycleResolver {
+
+    /** Rule 9's single rejection. {@link RecycleResult.Rejected} is a value record, so sharing one is safe. */
+    private static final RecycleResult.Rejected ZERO_YIELD = new RecycleResult.Rejected("zero yield");
 
     private RecycleResolver() {
     }
@@ -99,8 +115,11 @@ public final class RecycleResolver {
                 return new RecycleResult.Rejected("mixed alloys");
             }
             // One ingot batch per item melted, at the configured per-item yield.
-            return new RecycleResult.Remelt(
-                    inputs.get(0).alloyId(), inputs.size() * settings.yieldRemeltAlloy());
+            int amount = inputs.size() * settings.yieldRemeltAlloy();
+            if (isZeroYield(amount)) {
+                return ZERO_YIELD;
+            }
+            return new RecycleResult.Remelt(inputs.get(0).alloyId(), amount);
         }
 
         // Rule 3: fewer than `slots` items, regardless of composition, is rejected.
@@ -135,6 +154,9 @@ public final class RecycleResolver {
                     .collect(Collectors.toSet());
             if (distinctMetals.size() == 1) {
                 MetalType metal = distinctMetals.iterator().next();
+                if (isZeroYield(settings.yieldSameMetal())) {
+                    return ZERO_YIELD;
+                }
                 return new RecycleResult.SameMetal(metal, settings.yieldSameMetal());
             }
         }
@@ -145,12 +167,29 @@ public final class RecycleResolver {
                 .collect(Collectors.toSet());
         Optional<AlloyDefinition> namedMatch = alloys.findNamedMatch(presentIds);
         if (namedMatch.isPresent()) {
+            if (isZeroYield(settings.yieldMixedAlloy())) {
+                return ZERO_YIELD;
+            }
             return new RecycleResult.NamedAlloy(namedMatch.get().id(), settings.yieldMixedAlloy());
         }
 
         // Rule 8: otherwise, the generic fallback alloy.
+        if (isZeroYield(settings.yieldMixedAlloy())) {
+            return ZERO_YIELD;
+        }
         AlloyDefinition fallback = alloys.fallback();
         return new RecycleResult.GenericAlloy(fallback.id(), settings.yieldMixedAlloy());
+    }
+
+    /**
+     * Rule 9: whether {@code amount} is too small to deposit as a real item.
+     *
+     * <p>{@code <= 0}, not {@code == 0}: the config validator clamps every yield into
+     * 0-64, but this class takes a plain {@link RecyclingSettings} record that any
+     * caller can build, and a negative amount would destroy inputs the same way.
+     */
+    private static boolean isZeroYield(int amount) {
+        return amount <= 0;
     }
 
     /**
