@@ -339,6 +339,37 @@ unchanged; the contradiction is not propagated.
 
 ## 4. Compatibility
 
+**Alloy gear (`0.3.0`) note — reviewed, one new interaction surface.** The branch adds
+its first genuinely new player-facing surface since `0.1.0`: a crafting table. Reviewed
+against the Geyser/Floodgate/ViaVersion rules and verified live at gate 7a where
+possible:
+
+- **Input:** still inventory clicks and commands only. No typed chat input anywhere.
+- **UI:** no `setCustomModelData`, no `item_model`, no display entities — confirmed by
+  scanning `src/main`. **Base material is the entire visual-identity mechanism**, which
+  is why each alloy maps to a distinct vanilla tier: those textures already exist on
+  both editions, needing no resource pack.
+- **Identity:** gear is identified by PDC only (`xpfarm:custom_material`,
+  `xpfarm:material_id`, `xpfarm:gear_piece`), never by display name or lore substring.
+- **Bedrock recipe limitation, researched not assumed:** Bedrock's recipe ingredient
+  wire format has **no NBT field at all** (descriptor set is
+  `DEFAULT, MOLANG, ITEM_TAG, DEFERRED, COMPLEX_ALIAS`), so all 30 recipes reach a
+  Bedrock client as "netherite_ingot ×N + stick". This is a client limitation, not a
+  Geyser gap — GeyserMC closed the equivalent smithing request
+  ([#4706](https://github.com/GeyserMC/Geyser/issues/4706)) as *Can't Fix / Missing
+  Client Feature*. Real crafting still works: Geyser synthesizes a one-off recipe from
+  the actual grid stacks after ~150 ms. The `PrepareItemCraftEvent` backstop makes the
+  phantom path fail safe.
+- **Recipe discovery:** since 1.21.2 the server sends only unlocked recipes and
+  `Bukkit.addRecipe` unlocks nothing, so `Player#discoverRecipe` is required or the
+  recipe book is empty on **both** editions. Wired on join and on reload, with
+  `Bukkit.updateRecipes()` to resend.
+- **Protocol:** no assumption about the client's protocol version. Verified live at 7a
+  alongside ViaVersion 5.11.0, Geyser 2.11.0 and Floodgate 2.2.5, all green together.
+- **Attribute API:** `Attribute` is an *interface* on this Paper version, not an enum —
+  `GENERIC_*` constants, `EnumMap<Attribute,…>` and `Attribute.values()` all fail. Code
+  uses the interface constants throughout.
+
 **Continuous operation (`0.2.0`) note:** the bullets below were originally recorded
 against `0.1.0`/`0.1.1`. The branch adds no new player-facing interaction surface --
 still inventory clicks and commands only, the new `InventoryMoveItemEvent` handler
@@ -391,6 +422,44 @@ recorded outstanding for this branch below.
     static initializer cannot escape. No secrets exist to leak.
 
 ## 6. Tests and build
+
+### `0.3.0` (alloy gear crafting) — current, supersedes everything below
+
+`mvn --batch-mode --no-transfer-progress clean verify` → **exit 0, BUILD SUCCESS,
+416 tests, 0 failures, 0 errors, 0 skipped** (2026-07-22, run directly by the
+controller, not relayed). Exactly **2** `[WARNING]` lines, both pre-existing and both
+in `MachineGuiListenerTest.java:70,246` — `InventoryAction.HOTBAR_MOVE_AND_READD` is
+deprecated and marked for removal in the Paper API. That file is untouched by this
+branch, so this work introduces zero new warnings. (Its *marked-for-removal* status is
+a real upstream signal: a future Paper bump turns those two warnings into a build
+failure. Recorded as a follow-up, out of scope here.)
+
+Shaded JAR `target/electric-furnace-0.3.0.jar` inspected — never an `original-*`
+intermediate. Embedded `plugin.yml` reads `version: '0.3.0'`,
+`main: org.xpfarm.electricfurnace.ElectricFurnacePlugin`, `api-version: '1.21'`.
+
+**`api-version` deliberately left at `'1.21'` for this release.** The current standard
+is `'26.1'`, and the declaration is stale — the plugin already compiles against the
+26.1.2 API. Raising it is a *compatibility* change, not metadata: it switches off
+Paper's legacy bytecode rewrites and so requires gate 6 and gate 7a re-run. It was held
+back so `0.3.0` ships one variable rather than two — 30 new recipes plus a new
+item-minting path plus a bytecode-loading change would have made any failure
+unattributable. Filed as its own task with its own 7a run.
+
+**Test growth:** 311 tracked at branch point → **416**. The pure core
+(`GearPiece`, `GearStatsDeriver`, `GearStats`, `GearBase`) is exhaustively covered with
+no running server, matching the `MetalClassifier`/`RecycleResolver` precedent.
+`GearItemFactory`, `GearRecipes` and the lifecycle wiring have no unit tests by design —
+constructing a real `ItemStack` needs a live server, and this codebase deliberately does
+not mock Bukkit glue.
+
+**Six of the thirteen task briefs prescribed tests that missed the behaviour they
+named**, each caught by an implementer's mutation testing rather than by review: the
+armor-split tests never pinned largest-remainder ranking; the durability tests never
+pinned rounding direction; `derive`'s tests used one alloy so three hardcoding mutants
+survived; `GearBase`'s never called `id()`; the config tests could not tell a thematic
+default from a hardcoded `IRON`; and the command's unknown-piece test passed with the
+entire branch deleted. All closed.
 
 **Superseded for `0.2.0`.** The `238 tests` / `electric-furnace-0.1.0.jar` bullets
 below describe the pre-continuous-operation build and are kept only as history; they
@@ -448,6 +517,98 @@ pass (continuous-operation, targeting `0.2.0`) replaces them immediately below.
   excluded from release assets by the workflow's `! -name 'original-*'` filter.
 
 ## 7. Matrix
+
+### 7a — Single-plugin runtime verification — PASSED for `0.3.0` (2026-07-22)
+
+Booted on a fresh disposable Legendary stack via the shared rig
+(`scripts/test-stack.sh up` → slot 0, java 25600, bedrock 19200, rcon 25575;
+project `xpfarm-plugin-test-electric-furnace-2494d778`). The rig's three
+preconditions all passed: Paper's own `Done (16.932s)! For help` line; a real
+Minecraft protocol handshake on the Java port (`Paper 26.1.2 | protocol 775`),
+not merely a TCP connect; and RCON `plugins` listing this plugin **green**.
+
+**Whole cross-play stack green together:**
+`ElectricFurnace (0.3.0)`, `Geyser-Spigot (2.11.0-SNAPSHOT)`, `ViaVersion (5.11.0)`,
+`floodgate (2.2.5-SNAPSHOT b138-fc99cfc)` — all four enabled, none red, none absent.
+Enable line: `ElectricFurnace enabled (5 alloys, effects on, ticker on).`
+
+**Exercised over RCON, all passing:**
+
+- `/electricfurnace info` — renders every alloy **with its gear base material**
+  (`electrum_steel (Electrum Steel, diamond base)`, `ferrocopper (…, copper base)`,
+  `rose_gold (…, gold base)`, `fused_alloy (…, netherite base)`, `steel (…, iron base)`),
+  confirming Task 13's `alloyInfoLine` live. The remelt line reads
+  `alloy remelt  1 ingots each` — Task 13's carried per-item wording fix, confirmed live.
+- `/electricfurnace reload` — run **three times consecutively**, all clean. This is the
+  live evidence for the "30 recipes, not 60" property: `GearRecipes.register()` calls
+  `unregister()` first and removes each key before re-adding it, so a broken teardown
+  would surface as `Bukkit.addRecipe` throwing on a duplicate `NamespacedKey`. No such
+  warning appeared on any of the three reloads.
+- **Command parsing (Task 12), every path:** usage line carries `[piece]`;
+  `alloy steel trousers` → `Unknown gear piece 'trousers'`; `alloy nosuchalloy sword` →
+  `Unknown alloy 'nosuchalloy'`; `alloy steel sword 3 extra` → `Too many arguments`
+  (the surplus-argument strictness the implementer kept against the plan's sketch);
+  and the **ambiguous third token resolved correctly** — `alloy steel 5` reached the
+  inventory check as an amount rather than erroring as an unknown piece.
+- **All 30 recipes registered.** `GearRecipes.registerOne` warns by name on any failure
+  and `GearItemFactory` returns empty when a base material is absent. Zero
+  `Failed to register` and zero `has no <piece> on this server` lines appeared — which
+  also positively confirms this Paper 26.1.2 build carries vanilla copper equipment,
+  the 1.21.9+ assumption Ferrocopper's `base: copper` depends on.
+- **Logs clean throughout** — startup, three reloads, nine command invocations, and
+  shutdown produced zero exceptions, zero `SEVERE`, zero `org.xpfarm` stack frames, and
+  zero plugin warnings.
+- **Clean shutdown**, no exceptions in the disable path. `scripts/test-stack.sh down`
+  removed container, volume and network and released the slot; no stack leaked.
+
+#### What 7a could NOT reach for `0.3.0` — the gate 12 play-test obligation
+
+This is the whole risk surface of the feature, and none of it is proven. No client
+attaches to this stack by design, and **console has no inventory**, so
+`/electricfurnace alloy <id> <piece>` correctly refused with
+`Console has no inventory; name a player` on every attempt — meaning
+**`GearItemFactory.create` never executed at runtime.** Not one gear item was minted.
+
+Owed, in priority order:
+
+1. **Craft one piece of each of the five alloys on Java.** The single highest-risk
+   unproven assumption in the release. `ExactChoice` snapshots its ingredient at
+   *registration* and compares the entire `DataComponentPatch`; if the stack
+   `AlloyItemFactory` produces at registration differs by one component from the one the
+   machine deposits at runtime, **all 30 recipes match nothing, silently, with no error
+   anywhere.** Nothing headless can test this.
+2. **Read the tooltips.** Steel Sword must show **6.5** damage / 1.4 attack speed;
+   Steel Chestplate +7 armor / +1 toughness; the Steel set 2/7/5/2 summing to 16 with
+   231/336/315/273 durability. A sword showing **7.5** means the display→modifier
+   conversion went the wrong way; **3.0** means `addAttributeModifier` merged instead of
+   replacing. Both are single-call behaviours only a live server settles.
+3. **Fused Alloy, acceptance checks 6 and 7.** Sword dropped in lava must **burn**
+   (`unsetData` vs `resetData`); full set must **not** resist knockback.
+4. **Bedrock manual placement** of all six Steel pieces, plus the phantom: lay out
+   *vanilla* netherite ingots in the sword shape, click the fake output, confirm nothing
+   sticks to the cursor and nothing duplicates.
+5. **The three laundering paths the final review found and fixed**, now needing
+   confirmation: nine alloy ingots in a 3×3 must not become a netherite block; two
+   damaged alloy swords must not repair into a plain iron sword; smithing-template
+   duplication must not consume a stamped item.
+6. **Recycle a four-piece Steel set** (yields 4 × `yield-remelt-alloy`) and **a Steel
+   sword + a Rose Gold sword** (must reject with `mixed alloys`).
+7. **Crafting with `electricfurnace.craft` revoked** must blank the result.
+8. **An ingot minted before a `/electricfurnace reload`** — known gap: it no longer
+   satisfies the rebuilt `ExactChoice`, so the recipe book shows the recipe and the grid
+   produces nothing, silently.
+
+Every event this plugin listens to went unexercised — no `PrepareItemCraftEvent`,
+`PlayerJoinEvent`, `BlockPlaceEvent`, `InventoryClickEvent`, or redstone event fired,
+because RCON proves a command ran, not that an event fired. The RCON test-harness
+plugin specified in `PLUGIN_LIFECYCLE.md` §7 does not exist yet.
+
+### 7b — full-roster ecosystem matrix — NOT run, out-of-band, not required for release
+
+`minecraft-plugin-matrix` is triggered by an updater manifest change or a
+Paper/Geyser/Floodgate/ViaVersion bump, not by every `dev` run. `0.3.0` changes none of
+those: no manifest change, no dependency bump, no new external service. Last full-roster
+run was the 12-plugin matrix on 2026-07-21.
 
 ### 7a — `0.2.1` delta — NOT re-verified live, deliberately
 
